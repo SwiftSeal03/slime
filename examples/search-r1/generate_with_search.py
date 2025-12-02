@@ -16,17 +16,14 @@ SEARCH_R1_CONFIGS = {
     "max_turns": 2,
     "topk": 3,
     "search_concurrency": 256,
-
     # ============== Search Backend Selection ==============
     "search_backend": "local",  # Options: "local" or "google"
-
     # ============== Local Search Configuration ==============
     # (Only used when search_backend="local")
     "local": {
         "search_url": "http://127.0.0.1:8000/retrieve",  # URL of your local retrieval server
         "proxy": None,  # Set to your proxy if needed
     },
-
     # ============== Google Search Configuration ==============
     # (Only used when search_backend="google")
     "google": {
@@ -34,10 +31,8 @@ SEARCH_R1_CONFIGS = {
         "snippet_only": True,  # Set to True to only return snippets
         "proxy": None,  # Set to your proxy if needed
     },
-
     # ============== Log Probability Collection ==============
     "return_logprob": True,  # Set to True to collect log probabilities for TIS metrics
-
     # ============== Reward Model Configuration ==============
     "format_score": 0.2,
 }
@@ -90,10 +85,7 @@ async def search(query: str) -> str:
             proxy=google_config["proxy"],
         )
     else:
-        raise ValueError(
-            f"Unknown search backend: {backend}. "
-            f"Must be either 'local' or 'google'."
-        )
+        raise ValueError(f"Unknown search backend: {backend}. " f"Must be either 'local' or 'google'.")
 
     return _passages2string(result)
 
@@ -142,7 +134,7 @@ async def execute_predictions(prediction: str) -> str:
         next_obs = ""
         done = True
     else:
-        next_obs = f"\nMy previous action is invalid. \
+        next_obs = "\nMy previous action is invalid. \
 If I want to search, I should put the query between <search> and </search>. \
 If I want to give the final answer, I should put the answer between <answer> and </answer>. Let me try again.\n"
         done = False
@@ -151,7 +143,7 @@ If I want to give the final answer, I should put the answer between <answer> and
 
 
 async def generate(args, sample: Sample, sampling_params) -> Sample:
-    assert not args.partial_rollout, f"Partial rollout is not supported for this function at the moment."
+    assert not args.partial_rollout, "Partial rollout is not supported for this function at the moment."
 
     state = GenerateState(args)
 
@@ -165,7 +157,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     loss_mask = []
     rollout_log_probs = [] if SEARCH_R1_CONFIGS["return_logprob"] else None
 
-    for turn_idx in range(SEARCH_R1_CONFIGS["max_turns"]):
+    for _turn_idx in range(SEARCH_R1_CONFIGS["max_turns"]):
         payload = {
             "text": prompt + response,
             "sampling_params": sampling_params,
