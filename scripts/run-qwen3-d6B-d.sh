@@ -65,10 +65,10 @@ EVAL_ARGS=(
 )
 
 PERF_ARGS=(
-   --tensor-model-parallel-size 2
+   --tensor-model-parallel-size 1
    --sequence-parallel
-   --pipeline-model-parallel-size 2
-   --context-parallel-size 1
+   --pipeline-model-parallel-size 1
+   --context-parallel-size 2
    --expert-model-parallel-size 1
    --expert-tensor-parallel-size 1
 
@@ -141,6 +141,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    -- python3 train.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 4 \
+   --rollout-num-gpus 2
    --colocate \
    --offload \
    ${MODEL_ARGS[@]} \
