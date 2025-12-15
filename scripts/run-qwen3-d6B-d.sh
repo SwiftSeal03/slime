@@ -17,28 +17,29 @@ export PYTHONBUFFERED=16
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
-NVLINK_COUNT=$(nvidia-smi | grep -o "NVLink" | wc -l)
-if [ "$NVLINK_COUNT" -gt 0 ]; then
-    HAS_NVLINK=1
-else
-    HAS_NVLINK=0
-fi
-echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
+# NVLINK_COUNT=$(nvidia-smi | grep -o "NVLink" | wc -l)
+# if [ "$NVLINK_COUNT" -gt 0 ]; then
+#     HAS_NVLINK=1
+# else
+#     HAS_NVLINK=0
+# fi
+# echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
+HAS_NVLINK=1
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "/root/slime/scripts/models/qwen3-0.6B.sh"
 
 CKPT_ARGS=(
-   --hf-checkpoint /root/Qwen3-0.6B
+   --hf-checkpoint /root/data/Qwen3-0.6B
    #--hf-checkpoint /root/Qwen3-0.6B-FP8
-   --ref-load /root/Qwen3-0.6B_torch_dist
-   --load /root/Qwen3-0.6B_slime/
-   --save /root/Qwen3-0.6B_slime/
-   --save-interval 20
+   --ref-load /root/data/Qwen3-0.6B_torch_dist
+   # --load /root/data/Qwen3-0.6B_slime/
+   --save /root/data/Qwen3-0.6B_slime/
+   --save-interval 25
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data /root/data/dapo-math-17k/dapo-math-17k.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -49,7 +50,7 @@ ROLLOUT_ARGS=(
    --num-rollout 5
    --rollout-batch-size 8
    --n-samples-per-prompt 8
-   --rollout-max-response-len 1024
+   --rollout-max-response-len 2048
    --rollout-temperature 0.8
 
    --global-batch-size 64
@@ -58,17 +59,17 @@ ROLLOUT_ARGS=(
 
 EVAL_ARGS=(
    --eval-interval 20
-   --eval-prompt-data aime /root/aime-2024/aime-2024.jsonl
-   --n-samples-per-eval-prompt 8
-   --eval-max-response-len 1024
+   --eval-prompt-data aime /root/data/aime-2024/aime-2024.jsonl
+   --n-samples-per-eval-prompt 16
+   --eval-max-response-len 8192
    --eval-top-p 0.7
 )
 
 PERF_ARGS=(
-   --tensor-model-parallel-size 1
+   --tensor-model-parallel-size 2
    --sequence-parallel
    --pipeline-model-parallel-size 1
-   --context-parallel-size 2
+   --context-parallel-size 1
    --expert-model-parallel-size 1
    --expert-tensor-parallel-size 1
 
@@ -140,10 +141,8 @@ ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
    -- python3 train.py \
    --actor-num-nodes 1 \
-   --actor-num-gpus-per-node 4 \
-   --rollout-num-gpus 2
-   --colocate \
-   --offload \
+   --actor-num-gpus-per-node 2 \
+   --rollout-num-gpus 2 \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
