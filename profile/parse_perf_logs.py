@@ -1,63 +1,81 @@
 #!/usr/bin/env python3
 """
-Parse performance logs from the logs folder.
+Parse performance logs from log files.
 
-Finds lines with "perf N:" pattern containing "MegatronTrainRayActor" or "RolloutManager",
-parses the dictionary, averages entries across iterations (excluding first iteration), 
-and creates a grouped stacked bar plot.
-
-Each log file becomes a group with 3 stacked bars:
-  a) step_time
-  b) train_wait_time + train_time
-  c) update_weights_time + sleep_time + rollout_time + wake_up_time + log_probs_time + data_preprocess_time + actor_train_time
+Provides functions to parse different types of log entries:
+- Performance metrics (perf N:)
+- Real performance metrics (real-perf N:)
+- Training loss (step N:)
+- Rollout rewards (rollout N:)
 """
 
 import re
 import ast
-import os
-import argparse
-from pathlib import Path
 from collections import defaultdict
+from typing import List, Tuple, Optional, Callable, Union, Set
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 
-def parse_perf_lines(log_path: str, skip_first_iter: bool = True) -> dict:
+def parse_log_with_prefix(
+    log_path: str,
+    prefix_name: str,
+    pattern_modifier: Optional[str] = None,
+    extract_iteration: Optional[Callable] = None,
+    filter_dict: Optional[Callable] = None,
+    skip_iterations: Union[bool, Set[int], List[int]] = False
+) -> List[Tuple[int, dict]]:
     """
-    Parse a log file and extract performance metrics.
+    Generic function to parse log lines with pattern "<prefix_name>: {...}" or similar.
     
     Args:
         log_path: Path to the log file
-        skip_first_iter: If True, skip the first iteration (iteration 0) from results
+        prefix_name: The prefix to match (e.g., "real-perf", "step", "rollout")
+        pattern_modifier: Optional regex pattern to add before the prefix (e.g., for actor types)
+        extract_iteration: Optional function to extract iteration number from match groups.
+                          If None, assumes first group is iteration number.
+        filter_dict: Optional function to filter/transform the parsed dictionary.
+                     Signature: filter_dict(data: dict, match: re.Match) -> dict or None
+        skip_iterations: If True, skip the first iteration (iteration 0) from results.
+                        If a set/list of ints, skip those specific iteration numbers.
+                        For backward compatibility, True is treated as skip_first_iter=True.
     
-    Returns a dict of:
-        {
-            "MegatronTrainRayActor": {key: [values across iterations]},
-            "RolloutManager": {key: [values across iterations]}
-        }
+    Returns:
+        List of tuples: [(iteration_num, dict_data), ...]
     """
-    # Pattern to match lines with perf N: followed by a dict
-    # e.g., "(MegatronTrainRayActor pid=143453) perf 3: {'perf/sleep_time': ...}"
-    pattern = r'\((MegatronTrainRayActor|RolloutManager)\s+pid=\d+\).*?perf\s+(\d+):\s*(\{.*\})'
+    # Build pattern: if pattern_modifier is provided, include it before prefix
+    if pattern_modifier:
+        # For patterns like "(MegatronTrainRayActor pid=123) perf N: {...}"
+        pattern = rf'{pattern_modifier}.*?{prefix_name}\s+(\d+):\s*(\{{.*?\}})'
+    else:
+        # For patterns like "real-perf N: {...}" or "step N: {...}"
+        pattern = rf'{prefix_name}\s+(\d+):\s*(\{{.*?\}})'
     
-    results = {
-        "MegatronTrainRayActor": defaultdict(list),
-        "RolloutManager": defaultdict(list),
-    }
+    results = []
     
-    # First pass: find the minimum iteration number
-    min_iteration = None
-    with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
-        for line in f:
-            clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line)
-            match = re.search(pattern, clean_line)
-            if match:
-                iteration = int(match.group(2))
-                if min_iteration is None or iteration < min_iteration:
-                    min_iteration = iteration
+    # Normalize skip_iterations: convert bool/True to set of first iteration, or ensure it's a set
+    skip_set: Set[int] = set()
+    if skip_iterations is True:
+        # Backward compatibility: find first iteration and skip it
+        min_iteration = None
+        with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line)
+                match = re.search(pattern, clean_line)
+                if match:
+                    if extract_iteration:
+                        iteration = extract_iteration(match)
+                    else:
+                        iteration = int(match.group(1))
+                    if min_iteration is None or iteration < min_iteration:
+                        min_iteration = iteration
+        if min_iteration is not None:
+            skip_set.add(min_iteration)
+    elif skip_iterations:
+        # Convert list/set to set
+        skip_set = set(skip_iterations)
     
-    # Second pass: collect data, optionally skipping first iteration
+    # Second pass: collect data
     with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
         for line in f:
             # Remove ANSI escape codes
@@ -65,24 +83,124 @@ def parse_perf_lines(log_path: str, skip_first_iter: bool = True) -> dict:
             
             match = re.search(pattern, clean_line)
             if match:
-                actor_type = match.group(1)
-                iteration = int(match.group(2))
-                dict_str = match.group(3)
+                if extract_iteration:
+                    iteration = extract_iteration(match)
+                else:
+                    iteration = int(match.group(1))
+                # Get the last group which always contains the dictionary
+                dict_str = match.groups()[-1]
                 
-                # Skip first iteration if requested
-                if skip_first_iter and iteration == min_iteration:
+                # Skip iteration if in skip_set
+                if iteration in skip_set:
                     continue
                 
                 try:
                     data = ast.literal_eval(dict_str)
-                    for key, value in data.items():
-                        # Only keep keys ending with "time"
-                        if key.endswith('time'):
-                            if isinstance(value, (int, float)):
-                                results[actor_type][key].append(value)
+                    
+                    # Apply filter if provided
+                    if filter_dict:
+                        data = filter_dict(data, match)
+                        if data is None:
+                            continue
+                    
+                    results.append((iteration, data))
                 except (SyntaxError, ValueError) as e:
                     print(f"Warning: Could not parse dict in line: {line[:100]}... Error: {e}")
                     continue
+    
+    return results
+
+
+def parse_real_perf_lines(log_path: str, skip_iterations: Union[bool, Set[int], List[int]] = True) -> dict:
+    """
+    Parse a log file and extract real-perf performance metrics from train.py.
+    
+    Args:
+        log_path: Path to the log file
+        skip_iterations: If True, skip the first iteration (iteration 0) from results.
+                        If a set/list of ints, skip those specific iteration numbers.
+    
+    Returns a dict of:
+        {"real_perf": {key: [values across iterations]}}
+    """
+    def filter_time_keys(data: dict, match) -> dict:
+        """Filter to only keep keys ending with 'time' and numeric values."""
+        filtered = {}
+        for key, value in data.items():
+            if key.endswith('time') and isinstance(value, (int, float)):
+                filtered[key] = value
+        return filtered if filtered else None
+    
+    parsed_data = parse_log_with_prefix(
+        log_path=log_path,
+        prefix_name="real-perf",
+        filter_dict=filter_time_keys,
+        skip_iterations=skip_iterations
+    )
+    
+    results = defaultdict(list)
+    for iteration, data in parsed_data:
+        for key, value in data.items():
+            results[key].append(value)
+    
+    return {"real_perf": dict(results)}
+
+
+def parse_perf_lines(log_path: str, skip_iterations: Union[bool, Set[int], List[int]] = True) -> dict:
+    """
+    Parse a log file and extract performance metrics.
+    
+    Args:
+        log_path: Path to the log file
+        skip_iterations: If True, skip the first iteration (iteration 0) from results.
+                        If a set/list of ints, skip those specific iteration numbers.
+    
+    Returns a dict of:
+        {
+            "MegatronTrainRayActor": {key: [values across iterations]},
+            "RolloutManager": {key: [values across iterations]}
+        }
+    """
+    def extract_iteration_from_match(match) -> int:
+        """Extract iteration number from match (group 2 when pattern_modifier is used)."""
+        return int(match.group(2))
+    
+    def filter_time_keys_with_actor(data: dict, match) -> dict:
+        """Filter to only keep keys ending with 'time' and add actor_type to the dict."""
+        actor_type = match.group(1)
+        filtered = {}
+        for key, value in data.items():
+            if key.endswith('time') and isinstance(value, (int, float)):
+                filtered[key] = value
+        # Store actor_type in the dict for later separation
+        if filtered:
+            filtered['_actor_type'] = actor_type
+            return filtered
+        return None
+    
+    # Use pattern_modifier to include actor type before "perf"
+    pattern_modifier = r'\((MegatronTrainRayActor|RolloutManager)\s+pid=\d+\)'
+    
+    parsed_data = parse_log_with_prefix(
+        log_path=log_path,
+        prefix_name="perf",
+        pattern_modifier=pattern_modifier,
+        extract_iteration=extract_iteration_from_match,
+        filter_dict=filter_time_keys_with_actor,
+        skip_iterations=skip_iterations
+    )
+    
+    results = {
+        "MegatronTrainRayActor": defaultdict(list),
+        "RolloutManager": defaultdict(list),
+    }
+    
+    # Separate data by actor type
+    for iteration, data in parsed_data:
+        actor_type = data.pop('_actor_type', None)
+        if actor_type and actor_type in results:
+            for key, value in data.items():
+                results[actor_type][key].append(value)
     
     return results
 
@@ -98,233 +216,84 @@ def compute_averages(results: dict) -> dict:
     return averages
 
 
-def get_metric_value(averages: dict, metric_name: str) -> float:
-    """Get the average value of a metric from either actor type."""
-    # Remove 'perf/' prefix if present for comparison
-    search_keys = [metric_name, f'perf/{metric_name}']
-    
-    for actor_type in averages:
-        for key in search_keys:
-            if key in averages[actor_type]:
-                return averages[actor_type][key]
-    return 0.0
-
-
-def compute_stacked_bar_values(averages: dict) -> tuple:
+def parse_train_loss_and_rollout_reward(log_path: str) -> dict:
     """
-    Compute the values for the 3 stacked bars.
+    Parse train loss and rollout reward from log file.
     
-    Returns (bar_a, bar_b, bar_c) where:
-        bar_a: step_time
-        bar_b: train_wait_time + train_time
-        bar_c: update_weights_time + sleep_time + rollout_time + wake_up_time + 
-               log_probs_time + data_preprocess_time + actor_train_time
+    Args:
+        log_path: Path to the log file
+    
+    Returns a dict of:
+        {
+            "train_loss": [(step, loss_value), ...],
+            "rollout_reward": [(rollout_num, {"raw_reward": ..., "rewards": ...}), ...]
+        }
     """
-    # Bar A: step_time
-    bar_a = get_metric_value(averages, 'step_time')
+    def filter_train_loss(data: dict, match) -> dict:
+        """Filter to only keep train/loss."""
+        if 'train/loss' in data:
+            return {'train/loss': data['train/loss']}
+        return None
     
-    # Bar B: train_wait_time + train_time
-    bar_b_components = ['train_wait_time', 'train_time']
-    bar_b_values = {comp: get_metric_value(averages, comp) for comp in bar_b_components}
-    bar_b = sum(bar_b_values.values())
+    def filter_rollout_reward(data: dict, match) -> dict:
+        """Filter to only keep rollout reward fields."""
+        reward_data = {}
+        if 'rollout/raw_reward' in data:
+            reward_data['raw_reward'] = data['rollout/raw_reward']
+        if 'rollout/rewards' in data:
+            reward_data['rewards'] = data['rollout/rewards']
+        return reward_data if reward_data else None
     
-    # Bar C: update_weights_time + sleep_time + rollout_time + wake_up_time + 
-    #        log_probs_time + data_preprocess_time + actor_train_time
-    bar_c_components = [
-        'update_weights_time', 'sleep_time', 'rollout_time', 
-        'wake_up_time', 'log_probs_time', 'data_preprocess_time', 'actor_train_time'
-    ]
-    bar_c_values = {comp: get_metric_value(averages, comp) for comp in bar_c_components}
-    bar_c = sum(bar_c_values.values())
+    # Parse step lines for train loss
+    step_data = parse_log_with_prefix(
+        log_path=log_path,
+        prefix_name="step",
+        filter_dict=filter_train_loss,
+        skip_first_iter=False
+    )
     
-    return (bar_a, bar_b, bar_c, bar_b_values, bar_c_values)
+    # Parse rollout lines for rewards
+    rollout_data = parse_log_with_prefix(
+        log_path=log_path,
+        prefix_name="rollout",
+        filter_dict=filter_rollout_reward,
+        skip_first_iter=False
+    )
+    
+    # Format results
+    train_losses = [(step_num, data['train/loss']) for step_num, data in step_data]
+    rollout_rewards = [(rollout_num, data) for rollout_num, data in rollout_data]
+    
+    return {
+        "train_loss": train_losses,
+        "rollout_reward": rollout_rewards
+    }
 
 
-def create_grouped_bar_plot(all_data: dict, output_path: str, title: str = "Performance Metrics Comparison"):
+def find_eval_iterations(log_path: str) -> Set[int]:
     """
-    Create a grouped stacked bar plot with individual component fractions labeled.
+    Find all iteration numbers that have evaluations.
     
-    all_data: dict mapping log_name -> averages dict
+    Evaluations are logged as "eval N: {...}" where N is the rollout_id/iteration number.
+    
+    Args:
+        log_path: Path to the log file
+    
+    Returns:
+        Set of iteration numbers that have evaluations
     """
-    log_names = list(all_data.keys())
-    n_groups = len(log_names)
+    eval_iterations = set()
+    pattern = r'eval\s+(\d+):'
     
-    if n_groups == 0:
-        print("No data to plot.")
-        return
+    with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for line in f:
+            # Remove ANSI escape codes
+            clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line)
+            match = re.search(pattern, clean_line)
+            if match:
+                eval_iter = int(match.group(1))
+                eval_iterations.add(eval_iter)
     
-    # Compute stacked bar values for each log file
-    bar_a_values = []
-    bar_b_details = []
-    bar_c_details = []
-    
-    for log_name in log_names:
-        averages = all_data[log_name]
-        bar_a, bar_b, bar_c, b_details, c_details = compute_stacked_bar_values(averages)
-        bar_a_values.append(bar_a)
-        bar_b_details.append(b_details)
-        bar_c_details.append(c_details)
-    
-    # Create the plot
-    fig, ax = plt.subplots(figsize=(max(12, n_groups * 4), 10))
-    
-    x = np.arange(n_groups)
-    width = 0.25
-    
-    # Color palettes for each bar type
-    colors_a = ['#e74c3c']  # Red for step_time
-    colors_b = ['#3498db', '#2980b9']  # Blues for bar B components
-    colors_c = ['#2ecc71', '#27ae60', '#1abc9c', '#16a085', '#f39c12', '#e67e22', '#d35400']  # Greens/oranges for bar C
-    
-    # Bar A: step_time (single component)
-    bars_a = ax.bar(x - width, bar_a_values, width, color=colors_a[0], alpha=0.85)
-    
-    # Add labels for bar A (100% since it's single component)
-    for i, (bar, val) in enumerate(zip(bars_a, bar_a_values)):
-        if val > 0:
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() / 2,
-                    f'step\n{val:.2f}s\n(100%)', ha='center', va='center', fontsize=8, fontweight='bold', color='white')
-    
-    # Bar B: stacked components (train_wait_time + train_time)
-    bar_b_components = ['train_wait_time', 'train_time']
-    bar_b_short_names = ['train_wait', 'train']
-    
-    # Calculate totals for bar B for percentage
-    bar_b_totals = [sum(bar_b_details[i].values()) for i in range(n_groups)]
-    
-    bottom_b = np.zeros(n_groups)
-    for j, comp in enumerate(bar_b_components):
-        values = [bar_b_details[i].get(comp, 0) for i in range(n_groups)]
-        bars = ax.bar(x, values, width, bottom=bottom_b, color=colors_b[j % len(colors_b)], alpha=0.85)
-        
-        # Add labels inside each stack segment with percentage
-        for i, (bar, val) in enumerate(zip(bars, values)):
-            if val > 0.1:  # Only label if value is significant
-                pct = (val / bar_b_totals[i] * 100) if bar_b_totals[i] > 0 else 0
-                ax.text(bar.get_x() + bar.get_width() / 2, bottom_b[i] + val / 2,
-                        f'{bar_b_short_names[j]}\n{val:.2f}s\n({pct:.0f}%)', ha='center', va='center', 
-                        fontsize=7, fontweight='bold', color='white')
-        bottom_b += values
-    
-    # Bar C: stacked components
-    bar_c_components = [
-        'update_weights_time', 'sleep_time', 'rollout_time', 
-        'wake_up_time', 'log_probs_time', 'data_preprocess_time', 'actor_train_time'
-    ]
-    bar_c_short_names = ['upd_wts', 'sleep', 'rollout', 'wake_up', 'log_probs', 'data_prep', 'actor_train']
-    
-    # Calculate totals for bar C for percentage
-    bar_c_totals = [sum(bar_c_details[i].values()) for i in range(n_groups)]
-    
-    bottom_c = np.zeros(n_groups)
-    for j, comp in enumerate(bar_c_components):
-        values = [bar_c_details[i].get(comp, 0) for i in range(n_groups)]
-        bars = ax.bar(x + width, values, width, bottom=bottom_c, color=colors_c[j % len(colors_c)], alpha=0.85)
-        
-        # Add labels inside each stack segment with percentage
-        for i, (bar, val) in enumerate(zip(bars, values)):
-            if val > 0.3:  # Only label if value is significant enough to fit text
-                pct = (val / bar_c_totals[i] * 100) if bar_c_totals[i] > 0 else 0
-                ax.text(bar.get_x() + bar.get_width() / 2, bottom_c[i] + val / 2,
-                        f'{bar_c_short_names[j]}\n{val:.2f}s\n({pct:.0f}%)', ha='center', va='center', 
-                        fontsize=6, fontweight='bold', color='white')
-        bottom_c += values
-    
-    # Add total labels on top of each bar
-    for i in range(n_groups):
-        # Total for bar A
-        ax.text(x[i] - width, bar_a_values[i] + 0.3, f'Σ{bar_a_values[i]:.2f}s', 
-                ha='center', va='bottom', fontsize=8, fontweight='bold')
-        # Total for bar B
-        total_b = sum(bar_b_details[i].values())
-        ax.text(x[i], total_b + 0.3, f'Σ{total_b:.2f}s', 
-                ha='center', va='bottom', fontsize=8, fontweight='bold')
-        # Total for bar C
-        total_c = sum(bar_c_details[i].values())
-        ax.text(x[i] + width, total_c + 0.3, f'Σ{total_c:.2f}s', 
-                ha='center', va='bottom', fontsize=8, fontweight='bold')
-    
-    # Customize the plot
-    ax.set_xlabel('Log File', fontsize=12)
-    ax.set_ylabel('Time (seconds)', fontsize=12)
-    ax.set_title(title, fontsize=14, fontweight='bold')
-    ax.set_xticks(x)
-    ax.set_xticklabels(log_names, rotation=0, ha='center', fontsize=11)
-    
-    ax.grid(axis='y', linestyle='--', alpha=0.7)
-    
-    # Print breakdown to console
-    print("\nBreakdown details:")
-    for i, log_name in enumerate(log_names):
-        b_parts = ', '.join([f"{k.replace('_time', '')}={v:.2f}" for k, v in bar_b_details[i].items() if v > 0])
-        c_parts = ', '.join([f"{k.replace('_time', '')}={v:.2f}" for k, v in bar_c_details[i].items() if v > 0])
-        print(f"{log_name}:\n  Bar B: {b_parts}\n  Bar C: {c_parts}")
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"\nPlot saved to: {output_path}")
-    plt.close()
+    return eval_iterations
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Parse performance logs and create bar plots.")
-    parser.add_argument('--logs-dir', type=str, default=None,
-                        help='Directory containing log files (default: ../logs)')
-    parser.add_argument('--output-dir', type=str, default=None,
-                        help='Directory to save output plots (default: ./figures)')
-    parser.add_argument('--include-first-iter', action='store_true',
-                        help='Include the first iteration in average calculation (excluded by default)')
-    args = parser.parse_args()
-    
-    # Determine directories
-    script_dir = Path(__file__).parent.resolve()
-    logs_dir = Path(args.logs_dir) if args.logs_dir else script_dir.parent / 'logs'
-    output_dir = Path(args.output_dir) if args.output_dir else script_dir / 'figures'
-    
-    skip_first = not args.include_first_iter
-    
-    if not logs_dir.exists():
-        print(f"Error: Logs directory not found: {logs_dir}")
-        return
-    
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Find all .log files
-    log_files = sorted(list(logs_dir.glob('*.log')))
-    
-    if not log_files:
-        print(f"No .log files found in {logs_dir}")
-        return
-    
-    print(f"Found {len(log_files)} log file(s) in {logs_dir}")
-    if skip_first:
-        print("Note: First iteration is excluded from average calculation")
-    
-    # Collect data from all log files
-    all_data = {}
-    
-    for log_file in log_files:
-        print(f"\nProcessing: {log_file.name}")
-        
-        # Parse the log file
-        results = parse_perf_lines(str(log_file), skip_first_iter=skip_first)
-        
-        # Print summary of found metrics
-        for actor_type, metrics in results.items():
-            if metrics:
-                print(f"  {actor_type}:")
-                for key, values in metrics.items():
-                    print(f"    {key}: {len(values)} entries, avg={np.mean(values):.4f}")
-        
-        # Compute averages
-        averages = compute_averages(results)
-        all_data[log_file.stem] = averages
-    
-    # Create grouped bar plot
-    output_path = output_dir / "perf_comparison.png"
-    title = "Performance Metrics Comparison (Excluding First Iteration)" if skip_first else "Performance Metrics Comparison"
-    create_grouped_bar_plot(all_data, str(output_path), title)
-
-
-if __name__ == "__main__":
-    main()
