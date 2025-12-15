@@ -1,3 +1,4 @@
+import time
 import ray
 from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
 
@@ -62,21 +63,30 @@ def train(args):
     # note that for async training, one can change the position of the sync operation(ray.get).
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         # TODO extract the duplicated eval logic
-        # if args.eval_interval is not None and rollout_id == 0:
-        #     ray.get(rollout_manager.eval.remote(rollout_id))
+        if args.eval_interval is not None and rollout_id == 0:
+            ray.get(rollout_manager.eval.remote(rollout_id))
 
+        iter_start = time.time()
+        t_generate = time.time()
         rollout_data_ref = ray.get(rollout_manager.generate.remote(rollout_id))
-
+        t_offload_rollout = time.time()
+        
         if args.offload_rollout:
             ray.get(rollout_manager.offload.remote())
+        t_train = time.time()
 
         if args.use_critic:
             critic_train_handle = critic_model.async_train(rollout_id, rollout_data_ref)
+            t_actor_train = time.time()
             if rollout_id >= args.num_critic_only_steps:
                 ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
+            t_critic_wait = time.time()
             ray.get(critic_train_handle)
         else:
+            t_actor_train = time.time()
             ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
+            t_critic_wait = time.time()
+        t_save = time.time()
 
         if args.save_interval is not None and (
             (rollout_id + 1) % args.save_interval == 0
@@ -88,15 +98,37 @@ def train(args):
                 critic_model.save_model(rollout_id)
             if args.rollout_global_dataset:
                 ray.get(rollout_manager.save.remote(rollout_id))
+        t_offload_train = time.time()
 
         offload_train()
+        t_onload_rollout = time.time()
         onload_rollout()
+        t_update_weights = time.time()
         actor_model.update_weights()
+        t_onload_additional = time.time()
 
         if args.offload_rollout:
             if GPU_MEMORY_TYPE_CUDA_GRAPH is not None:
                 ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_CUDA_GRAPH]))
             ray.get(rollout_manager.onload.remote(tags=[GPU_MEMORY_TYPE_KV_CACHE]))
+        iter_end = time.time()
+
+        # Compute timing intervals
+        timing_dict = {
+            'generate_time': t_offload_rollout - t_generate,
+            'offload_rollout_time': (t_train - t_offload_rollout) if args.offload_rollout else 0.0,
+            'actor_train_time': (t_critic_wait - t_actor_train) if (not args.use_critic or rollout_id >= args.num_critic_only_steps) else 0.0,
+            'critic_train_launch_time': (t_actor_train - t_train) if args.use_critic else 0.0,
+            'critic_train_wait_time': (t_save - t_critic_wait) if args.use_critic else 0.0,
+            'critic_train_time': (t_save - t_train) if args.use_critic else 0.0,
+            'save_time': (t_offload_train - t_save),
+            'offload_train_time': t_onload_rollout - t_offload_train,
+            'onload_rollout_time': t_update_weights - t_onload_rollout,
+            'update_weights_time': t_onload_additional - t_update_weights,
+            'onload_rollout_additional_time': (iter_end - t_onload_additional) if args.offload_rollout else 0.0,
+            'total_iteration_time': iter_end - iter_start,
+        }
+        print(f"real-perf {rollout_id}: {timing_dict}")
 
         if args.eval_interval is not None and (
             (rollout_id + 1) % args.eval_interval == 0
