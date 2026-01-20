@@ -261,6 +261,70 @@ def create_grouped_bar_plot(all_data: dict, all_real_perf_data: dict, output_pat
     plt.close()
 
 
+def plot_iteration_times(log_path: str, output_path: str, results: dict):
+    """
+    Plot rollout_time, log_probs_time, and actor_train_time across iterations.
+    
+    Args:
+        log_path: Path to the log file (for naming)
+        output_path: Path to save the output plot
+        results: Results dict from parse_perf_lines with _iteration_data key
+    """
+    iteration_data = results.get("_iteration_data", {})
+    
+    if not iteration_data:
+        print(f"  No iteration-level data found for {Path(log_path).stem}")
+        return
+    
+    # Extract the three metrics we need
+    metrics_data = {
+        'rollout_time': iteration_data.get(('RolloutManager', 'perf/rollout_time'), []),
+        'log_probs_time': iteration_data.get(('MegatronTrainRayActor', 'perf/log_probs_time'), []),
+        'actor_train_time': iteration_data.get(('MegatronTrainRayActor', 'perf/actor_train_time'), []),
+    }
+    
+    # Check if we have any data
+    if not any(metrics_data.values()):
+        print(f"  No iteration-level data found for {Path(log_path).stem}")
+        return
+    
+    # Sort each metric by iteration
+    for metric_name in metrics_data:
+        metrics_data[metric_name].sort(key=lambda x: x[0])
+    
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    colors = {'rollout_time': 'g', 'log_probs_time': 'b', 'actor_train_time': 'r'}
+    markers = {'rollout_time': 'o', 'log_probs_time': 's', 'actor_train_time': '^'}
+    labels = {'rollout_time': 'Rollout Time', 'log_probs_time': 'Log Probs Time', 'actor_train_time': 'Actor Train Time'}
+    
+    for metric_name in ['rollout_time', 'log_probs_time', 'actor_train_time']:
+        if metrics_data[metric_name]:
+            iterations, values = zip(*metrics_data[metric_name])
+            ax.plot(
+                iterations,
+                values,
+                color=colors[metric_name],
+                marker=markers[metric_name],
+                linewidth=2,
+                markersize=4,
+                label=labels[metric_name],
+                alpha=0.8
+            )
+    
+    ax.set_xlabel('Iteration', fontsize=12)
+    ax.set_ylabel('Time (seconds)', fontsize=12)
+    ax.set_title(f'Time Metrics Across Iterations - {Path(log_path).stem}', fontsize=14, fontweight='bold')
+    ax.grid(True, linestyle='--', alpha=0.7)
+    ax.legend(fontsize=10, loc='best')
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"  Iteration plot saved to: {output_path}")
+    plt.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Parse performance logs and create breakdown plots.")
     parser.add_argument('--logs-dir', type=str, default=None,
@@ -344,19 +408,24 @@ def main():
         if skip_iters and isinstance(skip_iters, set) and skip_iters:
             print(f"  Total iterations to skip: {sorted(skip_iters)}")
         
-        # Parse the log file for perf lines
-        results = parse_perf_lines(str(log_file), skip_iterations=skip_iters)
+        # Parse the log file for perf lines (with iteration data for plotting)
+        results = parse_perf_lines(str(log_file), skip_iterations=skip_iters, return_iteration_data=True)
         
         # Print summary of found metrics
         for actor_type, metrics in results.items():
-            if metrics:
+            if actor_type != "_iteration_data" and metrics:
                 print(f"  {actor_type}:")
                 for key, values in metrics.items():
                     print(f"    {key}: {len(values)} entries, avg={np.mean(values):.4f}")
         
-        # Compute averages
-        averages = compute_averages(results)
+        # Compute averages (exclude _iteration_data from averages computation)
+        results_for_averages = {k: v for k, v in results.items() if k != "_iteration_data"}
+        averages = compute_averages(results_for_averages)
         all_data[log_file.stem] = averages
+        
+        # Create iteration-level time plot for this log file
+        iteration_output_path = output_dir / f"{log_file.stem}_iteration_times.png"
+        plot_iteration_times(str(log_file), str(iteration_output_path), results)
         
         # Parse real-perf lines (use same skip logic)
         real_perf_results = parse_real_perf_lines(str(log_file), skip_iterations=skip_iters)

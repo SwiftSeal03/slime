@@ -146,7 +146,7 @@ def parse_real_perf_lines(log_path: str, skip_iterations: Union[bool, Set[int], 
     return {"real_perf": dict(results)}
 
 
-def parse_perf_lines(log_path: str, skip_iterations: Union[bool, Set[int], List[int]] = True) -> dict:
+def parse_perf_lines(log_path: str, skip_iterations: Union[bool, Set[int], List[int]] = True, return_iteration_data: bool = False) -> dict:
     """
     Parse a log file and extract performance metrics.
     
@@ -154,11 +154,13 @@ def parse_perf_lines(log_path: str, skip_iterations: Union[bool, Set[int], List[
         log_path: Path to the log file
         skip_iterations: If True, skip the first iteration (iteration 0) from results.
                         If a set/list of ints, skip those specific iteration numbers.
+        return_iteration_data: If True, also return iteration-level data as "_iteration_data" key
     
     Returns a dict of:
         {
             "MegatronTrainRayActor": {key: [values across iterations]},
-            "RolloutManager": {key: [values across iterations]}
+            "RolloutManager": {key: [values across iterations]},
+            "_iteration_data": {(actor_type, key): [(iteration, value), ...]}  # if return_iteration_data=True
         }
     """
     def extract_iteration_from_match(match) -> int:
@@ -195,12 +197,19 @@ def parse_perf_lines(log_path: str, skip_iterations: Union[bool, Set[int], List[
         "RolloutManager": defaultdict(list),
     }
     
+    iteration_data = defaultdict(list) if return_iteration_data else None
+    
     # Separate data by actor type
     for iteration, data in parsed_data:
         actor_type = data.pop('_actor_type', None)
         if actor_type and actor_type in results:
             for key, value in data.items():
                 results[actor_type][key].append(value)
+                if return_iteration_data:
+                    iteration_data[(actor_type, key)].append((iteration, value))
+    
+    if return_iteration_data:
+        results["_iteration_data"] = dict(iteration_data)
     
     return results
 
@@ -249,7 +258,7 @@ def parse_train_loss_and_rollout_reward(log_path: str) -> dict:
         log_path=log_path,
         prefix_name="step",
         filter_dict=filter_train_loss,
-        skip_first_iter=False
+        skip_iterations=False
     )
     
     # Parse rollout lines for rewards
@@ -257,7 +266,7 @@ def parse_train_loss_and_rollout_reward(log_path: str) -> dict:
         log_path=log_path,
         prefix_name="rollout",
         filter_dict=filter_rollout_reward,
-        skip_first_iter=False
+        skip_iterations=False
     )
     
     # Format results
