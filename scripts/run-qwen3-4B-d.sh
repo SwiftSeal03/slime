@@ -48,7 +48,7 @@ ROLLOUT_ARGS=(
 
    --rm-type deepscaler
 
-   --num-rollout 200
+   --num-rollout 3
    --rollout-batch-size 32
    --n-samples-per-prompt 8
    --rollout-max-response-len 1024
@@ -113,7 +113,7 @@ OPTIMIZER_ARGS=(
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 1
    --use-slime-router
-   --sglang-mem-fraction-static 0.5
+   --sglang-mem-fraction-static 0.9
 )
 
 MISC_ARGS=(
@@ -142,10 +142,10 @@ RUNTIME_ENV_JSON="{
 
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
-   -- python3 train.py \
+   -- python3 train_async.py \
    --actor-num-nodes 1 \
-   --actor-num-gpus-per-node 4 \
-   --colocate \
+   --actor-num-gpus-per-node 2 \
+   --rollout-num-gpus 2 \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
