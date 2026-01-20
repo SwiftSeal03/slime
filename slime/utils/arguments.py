@@ -1457,10 +1457,10 @@ def slime_validate_args(args):
 
     # always true on offload for colocate at the moment.
     if args.colocate:
-        if args.offload_train is None:
-            args.offload_train = True
-        if args.offload_rollout is None:
-            args.offload_rollout = True
+        # if args.offload_train is None:
+        #     args.offload_train = True
+        # if args.offload_rollout is None:
+        #     args.offload_rollout = True
         if args.rollout_num_gpus != args.actor_num_gpus_per_node * args.actor_num_nodes:
             logger.info(
                 f"rollout_num_gpus {args.rollout_num_gpus} != actor_num_gpus_per_node {args.actor_num_gpus_per_node} "

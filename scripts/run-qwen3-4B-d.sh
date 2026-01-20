@@ -27,19 +27,20 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 HAS_NVLINK=1
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "/root/slime/scripts/models/qwen3-0.6B.sh"
+source "/root/slime/scripts/models/qwen3-4B.sh"
 
 CKPT_ARGS=(
-   --hf-checkpoint /root/data/Qwen3-0.6B
+   --hf-checkpoint /root/data/Qwen3-4B
    #--hf-checkpoint /root/Qwen3-0.6B-FP8
-   --ref-load /root/data/Qwen3-0.6B_torch_dist
-   # --load /root/data/Qwen3-0.6B_slime/
-   --save /root/data/Qwen3-0.6B_slime/
-   --save-interval 25
+   --ref-load /root/data/Qwen3-4B_torch_dist
+   # --load /root/data/Qwen3-4B_slime/
+   --save /root/data/Qwen3-4B_slime/
+   --save-interval 100
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data /root/data/dapo-math-17k/dapo-math-17k.jsonl
+   # --prompt-data /root/data/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data /root/data/gsm8k/train.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -47,21 +48,22 @@ ROLLOUT_ARGS=(
 
    --rm-type deepscaler
 
-   --num-rollout 5
-   --rollout-batch-size 8
+   --num-rollout 3
+   --rollout-batch-size 32
    --n-samples-per-prompt 8
-   --rollout-max-response-len 2048
+   --rollout-max-response-len 1024
    --rollout-temperature 0.8
 
-   --global-batch-size 64
+   --global-batch-size 256
    --balance-data
 )
 
 EVAL_ARGS=(
-   --eval-interval 20
-   --eval-prompt-data aime /root/data/aime-2024/aime-2024.jsonl
-   --n-samples-per-eval-prompt 16
-   --eval-max-response-len 8192
+   --eval-interval 100
+   # --eval-prompt-data aime /root/data/aime-2024/aime-2024.jsonl
+   --eval-prompt-data gsm8k /root/data/gsm8k/test.jsonl
+   --n-samples-per-eval-prompt 8
+   --eval-max-response-len 1024
    --eval-top-p 0.7
 )
 
@@ -111,6 +113,7 @@ OPTIMIZER_ARGS=(
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 1
    --use-slime-router
+   --sglang-mem-fraction-static 0.9
 )
 
 MISC_ARGS=(
@@ -139,7 +142,7 @@ RUNTIME_ENV_JSON="{
 
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
-   -- python3 train.py \
+   -- python3 train_async.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 2 \
    --rollout-num-gpus 2 \
