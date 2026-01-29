@@ -1,6 +1,7 @@
 # Adapt from https://github.com/NVIDIA/Megatron-LM/blob/b1efb3c7126ef7615e8c333432d76e08038e17ff/pretrain_gpt.py
 import argparse
 import inspect
+import re
 from contextlib import nullcontext
 from typing import Literal
 
@@ -15,6 +16,8 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 from megatron.core.transformer.spec_utils import import_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.arguments import core_transformer_config_from_args
+
+from slime.utils.misc import load_function
 
 
 # Adapt from https://github.com/volcengine/verl/blob/c3b20575d2bc815fcccd84bddb4c0401fc4b632b/verl/models/llama/megatron/layers/parallel_linear.py#L82
@@ -31,6 +34,8 @@ class LinearForLastLayer(torch.nn.Linear):
         self.sequence_parallel = config.sequence_parallel
         if self.sequence_parallel:
             self.weight.sequence_parallel = True
+            if bias:
+                self.bias.sequence_parallel = True
 
         self.weight.data.normal_(mean=0.0, std=0.02)
         if bias:
@@ -53,6 +58,46 @@ def get_model_provider_func(
     args: argparse.Namespace,
     role: Literal["actor", "critic"] = "actor",
 ):
+    # Support custom model provider path (similar to --custom-rm-path for reward models)
+    if getattr(args, "custom_model_provider_path", None):
+
+        def wrapped_model_provider(
+            pre_process: bool = True, post_process: bool = True, vp_stage: int | None = None
+        ) -> GPTModel:
+            custom_model_provider = load_function(args.custom_model_provider_path)
+            # Check if the custom provider supports vp_stage parameter
+            has_vp_stage = "vp_stage" in inspect.signature(custom_model_provider).parameters
+            if has_vp_stage:
+                model = custom_model_provider(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+            else:
+                model = custom_model_provider(pre_process=pre_process, post_process=post_process)
+            # Apply critic output layer if needed
+            if post_process and role == "critic":
+                model.output_layer = LinearForLastLayer(
+                    input_size=model.config.hidden_size, output_size=1, config=model.config
+                )
+            return model
+
+        return wrapped_model_provider
+
+    if args.megatron_to_hf_mode == "bridge":
+        from megatron.bridge import AutoBridge
+
+        bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
+        provider = bridge.to_megatron_provider(load_weights=False)
+        # TODO: we should not manually set this...
+        provider.tensor_model_parallel_size = args.tensor_model_parallel_size
+        provider.pipeline_model_parallel_size = args.pipeline_model_parallel_size
+        provider.expert_model_parallel_size = args.expert_model_parallel_size
+        provider.expert_tensor_parallel_size = args.expert_tensor_parallel_size
+        provider.sequence_parallel = args.sequence_parallel
+        if getattr(args, "decoder_first_pipeline_num_layers", None) is not None:
+            provider.num_layers_in_first_pipeline_stage = args.decoder_first_pipeline_num_layers
+        if getattr(args, "decoder_last_pipeline_num_layers", None) is not None:
+            provider.num_layers_in_last_pipeline_stage = args.decoder_last_pipeline_num_layers
+        provider.finalize()
+        return provider.provide
+
     def model_provider(pre_process: bool = True, post_process: bool = True, vp_stage: int | None = None) -> GPTModel:
         """Builds the model.
 
@@ -89,19 +134,19 @@ def get_model_provider_func(
                 # Define the decoder layer spec
                 if use_te:
                     transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
-                        args.num_experts,
-                        args.moe_grouped_gemm,
-                        args.qk_layernorm,
-                        args.multi_latent_attention,
-                        args.moe_use_legacy_grouped_gemm,
+                        num_experts=args.num_experts,
+                        moe_grouped_gemm=args.moe_grouped_gemm,
+                        qk_layernorm=args.qk_layernorm,
+                        multi_latent_attention=args.multi_latent_attention,
+                        moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
                     )
                 else:
                     transformer_layer_spec = get_gpt_layer_local_spec(
-                        args.num_experts,
-                        args.moe_grouped_gemm,
-                        args.qk_layernorm,
-                        args.multi_latent_attention,
-                        args.moe_use_legacy_grouped_gemm,
+                        num_experts=args.num_experts,
+                        moe_grouped_gemm=args.moe_grouped_gemm,
+                        qk_layernorm=args.qk_layernorm,
+                        multi_latent_attention=args.multi_latent_attention,
+                        moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
                     )
 
         build_model_context = nullcontext
@@ -161,3 +206,35 @@ def get_model_provider_func(
         return model
 
     return model_provider
+
+
+def wrap_model_provider_with_freeze(original_provider, args):
+    def wrapped_provider(pre_process=True, post_process=True, vp_stage=None):
+        sig = inspect.signature(original_provider)
+        if "vp_stage" in sig.parameters:
+            model = original_provider(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+        else:
+            model = original_provider(pre_process=pre_process, post_process=post_process)
+
+        freeze_model_params(model, args)
+
+        return model
+
+    return wrapped_provider
+
+
+def freeze_model_params(model: GPTModel, args: argparse.Namespace):
+    if args.only_train_params_name_list:
+        for name, param in model.named_parameters():
+            param.requires_grad = False
+            for pattern in args.only_train_params_name_list:
+                if re.search(pattern, name):
+                    param.requires_grad = True
+                    break
+
+    if args.freeze_params_name_list:
+        for name, param in model.named_parameters():
+            for pattern in args.freeze_params_name_list:
+                if re.search(pattern, name):
+                    param.requires_grad = False
+                    break

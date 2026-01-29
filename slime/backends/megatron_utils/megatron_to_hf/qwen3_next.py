@@ -1,11 +1,64 @@
 import re
 
-import sglang
 import torch
-from packaging.version import parse
+
+
+def _convert_mtp_layer(args, name, param, layer_idx):
+    """Convert MTP layer parameters from Megatron to HuggingFace format.
+
+    Handles both wrapper layers (enorm, hnorm, final_layernorm, eh_proj) and
+    inner transformer layers for any number of MTP layers.
+    """
+    # MTP wrapper layers (layer index independent in HF format)
+    if "enorm.weight" in name:
+        return [("mtp.pre_fc_norm_embedding.weight", param)]
+    if "hnorm.weight" in name:
+        return [("mtp.pre_fc_norm_hidden.weight", param)]
+    if "final_layernorm.weight" in name:
+        return [("mtp.norm.weight", param)]
+    if "eh_proj.weight" in name:
+        if param.dim() < 2:
+            raise ValueError(f"eh_proj weight expects 2D tensor, got {param.shape}")
+        first_half, second_half = param.chunk(2, dim=1)
+        new_param = torch.cat([second_half, first_half], dim=1)
+        return [("mtp.fc.weight", new_param)]
+
+    # MTP inner transformer layers (keep layer index)
+    if "transformer_layer" in name:
+        proxy_name = name.replace(
+            f"mtp.layers.{layer_idx}.transformer_layer",
+            f"decoder.layers.{layer_idx}"
+        )
+        mapped_params = convert_qwen3_next_to_hf(args, proxy_name, param)
+
+        final_params = []
+        for hf_name, tensor in mapped_params:
+            target_prefix = f"mtp.layers.{layer_idx}"
+            if f"model.layers.{layer_idx}" in hf_name:
+                new_hf_name = hf_name.replace(f"model.layers.{layer_idx}", target_prefix)
+                final_params.append((new_hf_name, tensor))
+            else:
+                final_params.append((hf_name, tensor))
+        return final_params
+
+    return None
 
 
 def convert_qwen3_next_to_hf(args, name, param):
+    """Convert Qwen3 Next model parameters from Megatron to HuggingFace format."""
+    # Handle MTP layers
+    if "mtp.layers" in name:
+        parts = name.split(".")
+        try:
+            layer_idx_loc = parts.index("layers") + 1
+            layer_idx = parts[layer_idx_loc]
+        except (ValueError, IndexError):
+            raise ValueError(f"Invalid MTP layer name format: {name}")
+
+        result = _convert_mtp_layer(args, name, param, layer_idx)
+        if result is not None:
+            return result
+
     if name == "module.module.embedding.word_embeddings.weight":
         return [("model.embed_tokens.weight", param)]
     if name == "module.module.output_layer.weight":
@@ -40,17 +93,6 @@ def convert_qwen3_next_to_hf(args, name, param):
                 outputs = [
                     (f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight", param),
                 ]
-                if parse(sglang.__version__) < parse("0.4.9.post5") and args.sglang_enable_ep_moe:
-                    outputs += [
-                        (
-                            f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.input_scale",
-                            torch.tensor(1.0, dtype=torch.float32, device=param.device),
-                        ),
-                        (
-                            f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.down_proj.weight_scale",
-                            torch.tensor(1.0, dtype=torch.float32, device=param.device),
-                        ),
-                    ]
                 return outputs
             else:
                 raise ValueError(f"Unknown expert parameter name: {name}")
@@ -75,8 +117,7 @@ def convert_qwen3_next_to_hf(args, name, param):
 
         if rest == "self_attention.linear_proj.weight":
             return [(f"model.layers.{layer_idx}.self_attn.o_proj.weight", param)]
-        elif rest == "self_attention.linear_qgkv.weight":
-
+        elif rest == "self_attention.linear_qkv.weight":
             param = param.view(args.num_query_groups, -1, head_dim, args.hidden_size)
             q_param, k_param, v_param = torch.split(
                 param, split_size_or_sections=[2 * value_num_per_group, 1, 1], dim=1
@@ -93,7 +134,7 @@ def convert_qwen3_next_to_hf(args, name, param):
                 (f"model.layers.{layer_idx}.self_attn.k_proj.weight", k_param),
                 (f"model.layers.{layer_idx}.self_attn.v_proj.weight", v_param),
             ]
-        elif rest == "self_attention.linear_qgkv.bias":
+        elif rest == "self_attention.linear_qkv.bias":
             param = param.view(args.num_query_groups, -1)
             q_bias, k_bias, v_bias = torch.split(
                 param,
@@ -116,7 +157,7 @@ def convert_qwen3_next_to_hf(args, name, param):
             ]
         elif rest == "mlp.linear_fc2.weight":
             return [(f"model.layers.{layer_idx}.mlp.down_proj.weight", param)]
-        elif rest == "self_attention.linear_qgkv.layer_norm_weight":
+        elif rest == "self_attention.linear_qkv.layer_norm_weight":
             return [(f"model.layers.{layer_idx}.input_layernorm.weight", param)]
         elif rest == "mlp.linear_fc1.layer_norm_weight":
             return [(f"model.layers.{layer_idx}.post_attention_layernorm.weight", param)]
