@@ -39,8 +39,8 @@ CKPT_ARGS=(
 )
 
 ROLLOUT_ARGS=(
-   # --prompt-data /root/data/dapo-math-17k/dapo-math-17k.jsonl
-   --prompt-data /root/data/gsm8k/train.jsonl
+   --prompt-data /root/data/dapo-math-17k/dapo-math-17k.jsonl
+   # --prompt-data /root/data/gsm8k/train.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -60,8 +60,8 @@ ROLLOUT_ARGS=(
 
 EVAL_ARGS=(
    --eval-interval 100
-   # --eval-prompt-data aime /root/data/aime-2024/aime-2024.jsonl
-   --eval-prompt-data gsm8k /root/data/gsm8k/test.jsonl
+   --eval-prompt-data aime /root/data/aime-2024/aime-2024.jsonl
+   # --eval-prompt-data gsm8k /root/data/gsm8k/test.jsonl
    --n-samples-per-eval-prompt 8
    --eval-max-response-len 1024
    --eval-top-p 0.7

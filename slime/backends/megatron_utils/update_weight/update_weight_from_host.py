@@ -59,7 +59,7 @@ class UpdateWeightFromHost:
         )
         pp_rank = mpu.get_pipeline_model_parallel_rank()
         if self._is_pp_src_rank:
-            self._group_name = f"slime-pp_{pp_rank}"
+            self._group_name = f"slime-pp_{pp_rank}-cpu"
 
         if self._is_pp_src_rank:
             if self._model_update_groups is not None:
@@ -77,6 +77,7 @@ class UpdateWeightFromHost:
         """
         self.weight_version += 1
 
+        # TODO: Remove the pause here
         if dist.get_rank() == 0:
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
             ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
@@ -245,12 +246,12 @@ def connect_rollout_engines_from_distributed(
             i * args.rollout_num_gpus_per_engine + 1,
             world_size,
             group_name,
-            backend="nccl",
+            backend="gloo",
         )
         for i, engine in enumerate(rollout_engines)
     ]
     model_update_groups = init_process_group(
-        backend="nccl",
+        backend="gloo",
         init_method=f"tcp://{master_address}:{master_port}",
         world_size=world_size,
         rank=0,
@@ -292,7 +293,7 @@ def update_weights_from_distributed(
 
     handles = []
     for _, param in converted_named_tensors:
-        handles.append(dist.broadcast(param.data, 0, group=group, async_op=True))
+        handles.append(dist.broadcast(param.data.cpu(), 0, group=group, async_op=True))
     for handle in handles:
         handle.wait()
 

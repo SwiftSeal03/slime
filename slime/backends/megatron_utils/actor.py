@@ -36,6 +36,7 @@ from .model import forward_only, initialize_model_and_optimizer, save, train
 from .update_weight.common import named_params_and_buffers
 from .update_weight.update_weight_from_distributed import UpdateWeightFromDistributed
 from .update_weight.update_weight_from_tensor import UpdateWeightFromTensor
+from .update_weight.update_weight_from_host import UpdateWeightFromHost
 
 logging.getLogger("megatron").setLevel(logging.WARNING)
 
@@ -112,7 +113,7 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.vocab_size is None:
             self.args.vocab_size = self.tokenizer.vocab_size
 
-        update_weight_cls = UpdateWeightFromTensor if self.args.colocate else UpdateWeightFromDistributed
+        update_weight_cls = UpdateWeightFromTensor if self.args.colocate else UpdateWeightFromHost
         self.weight_updater = update_weight_cls(
             self.args,
             self.model,
