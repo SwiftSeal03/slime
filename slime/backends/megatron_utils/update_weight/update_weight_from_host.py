@@ -1,7 +1,9 @@
 import socket
+import threading
 import time
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
+from queue import Queue
 
 import ray
 import torch
@@ -12,9 +14,30 @@ from ray.actor import ActorHandle
 from tqdm import tqdm
 
 from slime.utils.distributed_utils import get_gloo_group, init_process_group
+from slime.utils.timestamp import timestamp
 
 from ..megatron_to_hf import convert_to_hf
 from .common import all_gather_param, named_params_and_buffers
+
+
+def _copy_chunk_to_pinned(
+    converted_named_tensors: list[tuple[str, torch.Tensor]],
+    stream: torch.cuda.Stream,
+) -> list[tuple[str, torch.Tensor]]:
+    """Copy a chunk of (name, tensor) to pinned CPU memory for faster transfer.
+    Uses the given CUDA stream for non-blocking GPU->CPU copy. Caller records one
+    event after all chunks are launched.
+    """
+    pinned: list[tuple[str, torch.Tensor]] = []
+    with torch.cuda.stream(stream):
+        for name, t in converted_named_tensors:
+            src = t.data if hasattr(t, "data") else t
+            buf = torch.empty(
+                src.shape, dtype=src.dtype, device="cpu", pin_memory=True
+            )
+            buf.copy_(src)
+            pinned.append((name, buf))
+    return pinned
 
 
 class UpdateWeightFromHost:
@@ -41,6 +64,10 @@ class UpdateWeightFromHost:
         self.quantization_config = quantization_config
         self.weight_version = 0
         self._model_update_groups = None
+        self._timestamp_lock = threading.Lock()
+        self._chunk_queue: Queue | None = None
+        self._sender_thread: threading.Thread | None = None
+        self._offload_stream: torch.cuda.Stream | None = None
 
     def connect_rollout_engines(
         self, rollout_engines: Sequence[ActorHandle], rollout_engine_lock: ActorHandle
@@ -63,25 +90,72 @@ class UpdateWeightFromHost:
 
         if self._is_pp_src_rank:
             if self._model_update_groups is not None:
-                disconnect_rollout_engines_from_distributed(
+                disconnect_rollout_engines_from_host(
                     self.args, self._group_name, self._model_update_groups, self.rollout_engines
                 )
-            self._model_update_groups = connect_rollout_engines_from_distributed(
+            self._model_update_groups = connect_rollout_engines_from_host(
                 self.args, self._group_name, rollout_engines
             )
+            if self._chunk_queue is None:
+                self._chunk_queue = Queue()
+                self._offload_stream = torch.cuda.Stream()
+                self._sender_thread = threading.Thread(
+                    target=self._sender_thread_loop,
+                    daemon=False,
+                )
+                self._sender_thread.start()
+
+    def _sender_thread_loop(self) -> None:
+        """
+        Long-lived loop: consume from self._chunk_queue. Chunks (list) extend accumulated;
+        sentinel (tuple) means end: sync event, send accumulated if non-empty, update pbar, timestamp, continue.
+        Need to send is determined by type only: tuple -> sentinel, list -> chunk.
+        """
+        accumulated: list[tuple[str, torch.Tensor]] = []
+        while True:
+            item = self._chunk_queue.get()
+            if isinstance(item, tuple):
+                pbar, final_event, rollout_id = item
+                final_event.synchronize()
+                if accumulated:
+                    while not ray.get(self.rollout_engine_lock.acquire.remote()):
+                        time.sleep(0.1)
+                    refs = update_weights_from_host(
+                        self._group_name,
+                        self._model_update_groups,
+                        self.weight_version,
+                        self.rollout_engines,
+                        accumulated,
+                    )
+                    ray.get(refs)
+                    ray.get(self.rollout_engine_lock.release.remote())
+                pbar.update(1)
+                with self._timestamp_lock:
+                    timestamp(self.args, f"weight_updates_end {rollout_id}")
+                # if dist.get_rank() == 0:
+                #     ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
+                accumulated = []
+                continue
+            accumulated.extend(item)
+
 
     @torch.no_grad()
-    def update_weights(self) -> None:
+    def update_weights(self, rollout_id: int | None = None) -> None:
         """
         Pause → flush → non-expert (TP) → expert (EP) → continue. Progress on PP source.
+        Reuses instance-level _chunk_queue and long-lived _sender_thread.
         """
+        if rollout_id is not None:
+            with self._timestamp_lock:
+                timestamp(self.args, f"weight_updates_begin {rollout_id}")
+
         self.weight_version += 1
 
-        # TODO: Remove the pause here
-        if dist.get_rank() == 0:
-            ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
-            ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
-        dist.barrier(group=get_gloo_group())
+        # if dist.get_rank() == 0:
+        #     ray.get([e.pause_generation.remote() for e in self.rollout_engines])
+        #     ray.get([e.flush_cache.remote() for e in self.rollout_engines])
+        # dist.barrier(group=get_gloo_group())
+        
 
         buffer_size = 0
         converted_named_tensors = []
@@ -91,12 +165,12 @@ class UpdateWeightFromHost:
         for name, param in named_params_and_buffers(self.args, self.model):
             if ".experts." in name:
                 continue
-            buffer_size = self._update_weight_from_distributed(
-                name, param, converted_named_tensors, buffer_size, pbar=pbar
+            buffer_size = self._update_weight_from_host(
+                name, param, converted_named_tensors, buffer_size
             )
 
         if converted_named_tensors:
-            self._update_bucket_weights_from_distributed(converted_named_tensors, pbar=pbar)
+            self._update_bucket_weights_from_host(converted_named_tensors)
 
         dist.barrier(group=get_gloo_group())
 
@@ -105,25 +179,26 @@ class UpdateWeightFromHost:
         for name, param in named_params_and_buffers(self.args, self.model):
             if ".experts." not in name:
                 continue
-            buffer_size = self._update_expert_weight_from_distributed(
-                name, param, named_tensors, buffer_size, pbar=pbar
+            buffer_size = self._update_expert_weight_from_host(
+                name, param, named_tensors, buffer_size
             )
 
         if named_tensors:
-            self._update_expert_bucket_weights_from_distributed(named_tensors, pbar=pbar)
+            self._update_expert_bucket_weights_from_host(named_tensors)
 
-        dist.barrier(group=get_gloo_group())
-        if dist.get_rank() == 0:
-            ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
-        dist.barrier(group=get_gloo_group())
+        if self._is_pp_src_rank and self._chunk_queue is not None:
+            if rollout_id is not None:
+                with self._timestamp_lock:
+                    timestamp(self.args, f"weight_updates_offload_end {rollout_id}")
+            final_event = self._offload_stream.record_event()
+            self._chunk_queue.put((pbar, final_event, rollout_id))
 
-    def _update_weight_from_distributed(
+    def _update_weight_from_host(
         self,
         name: str,
         param: torch.nn.Parameter,
         converted_named_tensors: list[tuple[str, torch.Tensor]],
         buffer_size: int,
-        pbar: tqdm | None = None,
     ) -> int | None:
         """
         Non-expert: gather TP → rm pad → HF → buffer (flush if full). All gather, PP source buffers.
@@ -135,19 +210,18 @@ class UpdateWeightFromHost:
 
         param_size = param.numel() * param.element_size()
         if buffer_size + param_size > self.args.update_weight_buffer_size:
-            self._update_bucket_weights_from_distributed(converted_named_tensors, pbar=pbar)
+            self._update_bucket_weights_from_host(converted_named_tensors)
             buffer_size = 0
         converted_named_tensors += convert_to_hf(self.args, self.model_name, name, param, self.quantization_config)
         buffer_size += param_size
         return buffer_size
 
-    def _update_expert_weight_from_distributed(
+    def _update_expert_weight_from_host(
         self,
         name: str,
         param: torch.nn.Parameter,
         named_tensors: list[tuple[str, torch.Tensor]],
         buffer_size: int,
-        pbar: tqdm | None = None,
     ) -> int:
         """
         Expert: gather TP → rm pad → buffer. EP gather + HF deferred. Threshold × EP size.
@@ -158,15 +232,15 @@ class UpdateWeightFromHost:
         if (
             buffer_size + param_size
         ) * mpu.get_expert_model_parallel_world_size() > self.args.update_weight_buffer_size:
-            self._update_expert_bucket_weights_from_distributed(named_tensors, pbar=pbar)
+            self._update_expert_bucket_weights_from_host(named_tensors)
             buffer_size = 0
 
         named_tensors.append((name, param))
         buffer_size += param_size
         return buffer_size
 
-    def _update_expert_bucket_weights_from_distributed(
-        self, named_tensors: list[tuple[str, torch.Tensor]], pbar: tqdm | None = None
+    def _update_expert_bucket_weights_from_host(
+        self, named_tensors: list[tuple[str, torch.Tensor]]
     ) -> None:
         """
         Gather EP → HF → broadcast. Clears buffer.
@@ -201,33 +275,24 @@ class UpdateWeightFromHost:
         for name, param in all_gathered_params:
             converted_hf_tensors += convert_to_hf(self.args, self.model_name, name, param, self.quantization_config)
 
-        self._update_bucket_weights_from_distributed(converted_hf_tensors, pbar)
+        self._update_bucket_weights_from_host(converted_hf_tensors)
 
-    def _update_bucket_weights_from_distributed(
-        self, converted_named_tensors: list[tuple[str, torch.Tensor]], pbar: tqdm | None = None
+    def _update_bucket_weights_from_host(
+        self, converted_named_tensors: list[tuple[str, torch.Tensor]]
     ) -> None:
         """
-        Lock → broadcast → clear → unlock → pbar++. Lock prevents NCCL deadlock.
+        Offload chunk to pinned CPU on the shared _offload_stream and hand to sender thread.
+        One event and pbar are pushed only with the sentinel at the end.
         """
-        # lock the rollout engines to prevent dead lock on broadcast.
-        while not ray.get(self.rollout_engine_lock.acquire.remote()):
-            time.sleep(0.1)
-
-        refs = update_weights_from_distributed(
-            self._group_name,
-            self._model_update_groups,
-            self.weight_version,
-            self.rollout_engines,
-            converted_named_tensors,
-        )
-
-        ray.get(refs)
+        if not self._is_pp_src_rank:
+            converted_named_tensors.clear()
+            return
+        pinned_chunk = _copy_chunk_to_pinned(converted_named_tensors, self._offload_stream)
+        self._chunk_queue.put(pinned_chunk)
         converted_named_tensors.clear()
-        ray.get(self.rollout_engine_lock.release.remote())
-        pbar.update(1)
 
 
-def connect_rollout_engines_from_distributed(
+def connect_rollout_engines_from_host(
     args: Namespace, group_name: str, rollout_engines: Sequence[ActorHandle]
 ) -> dist.ProcessGroup:
     """
@@ -261,7 +326,7 @@ def connect_rollout_engines_from_distributed(
     return model_update_groups
 
 
-def disconnect_rollout_engines_from_distributed(args, group_name, model_update_groups, rollout_engines):
+def disconnect_rollout_engines_from_host(args, group_name, model_update_groups, rollout_engines):
     """
     Destroy NCCL on training and engines.
     """
@@ -270,7 +335,7 @@ def disconnect_rollout_engines_from_distributed(args, group_name, model_update_g
     ray.get(refs)
 
 
-def update_weights_from_distributed(
+def update_weights_from_host(
     group_name: str,
     group: dist.ProcessGroup,
     weight_version: int,
@@ -293,7 +358,8 @@ def update_weights_from_distributed(
 
     handles = []
     for _, param in converted_named_tensors:
-        handles.append(dist.broadcast(param.data.cpu(), 0, group=group, async_op=True))
+        assert param.is_cpu, "tensor is not on CPU"
+        handles.append(dist.broadcast(param, 0, group=group, async_op=True))
     for handle in handles:
         handle.wait()
 

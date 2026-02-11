@@ -82,6 +82,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--update-weights-from-host",
+                action="store_true",
+                default=False,
+                help="Use UpdateWeightFromHost for weight sync. Cannot be used with --colocate.",
+            )
+            parser.add_argument(
                 "--offload",
                 action="store_true",
                 default=False,
@@ -1168,6 +1174,36 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--check-weight-update-equal", action="store_true")
             return parser
 
+        def add_timestamp_arguments(parser):
+            parser.add_argument(
+                "--timestamp-mode",
+                type=str,
+                choices=["off", "print", "immediate", "flush_on_exit"],
+                default="off",
+                help=(
+                    "Record unix timestamps: off, print to log, immediate (write+flush each line to file), "
+                    "or flush_on_exit (buffer and write to file on exit). Use with --timestamp-path."
+                ),
+            )
+            parser.add_argument(
+                "--timestamp-path",
+                type=str,
+                default=None,
+                help=(
+                    "Directory for timestamp output when --timestamp-mode is immediate or flush_on_exit. "
+                    "Files are written as <timestamp-path>/main.txt, <timestamp-path>/actor-0.txt, actor-1.txt, ..., "
+                    "<timestamp-path>/rollout.txt according to process (driver, training ranks, rollout)."
+                ),
+            )
+            parser.add_argument(
+                "--timestamp-process",
+                type=str,
+                choices=["main", "actor", "rollout"],
+                default="main",
+                help="Process name for timestamp file (main=driver, actor=training actor, rollout=rollout). Default: main.",
+            )
+            return parser
+
         def add_network_arguments(parser):
             parser.add_argument("--http-proxy", type=str, default=None)
             parser.add_argument("--use-distributed-post", action="store_true", default=False)
@@ -1411,6 +1447,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
         parser = add_tensorboard_arguments(parser)
         parser = add_router_arguments(parser)
         parser = add_debug_arguments(parser)
+        parser = add_timestamp_arguments(parser)
         parser = add_sglang_arguments(parser)
         parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
@@ -1653,6 +1690,10 @@ def slime_validate_args(args):
 
     assert not (args.debug_rollout_only and args.debug_train_only), (
         "debug_rollout_only and debug_train_only cannot be set at the same time, " "please set only one of them."
+    )
+
+    assert not (args.colocate and getattr(args, "update_weights_from_host", False)), (
+        "--update-weights-from-host and --colocate cannot be set at the same time."
     )
 
     # always true on offload for colocate at the moment.

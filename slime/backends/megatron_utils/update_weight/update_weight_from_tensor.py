@@ -10,6 +10,7 @@ from ray import ObjectRef
 from ray.actor import ActorHandle
 
 from slime.utils.distributed_utils import get_gloo_group
+from slime.utils.timestamp import timestamp
 
 from ..sglang import FlattenedTensorBucket, MultiprocessingSerializer
 from .hf_weight_iterator_base import HfWeightIteratorBase
@@ -104,10 +105,13 @@ class UpdateWeightFromTensor:
                 self._ipc_engine = engine
 
     @torch.no_grad()
-    def update_weights(self) -> None:
+    def update_weights(self, rollout_id: int | None = None) -> None:
         """
         version++, flush caches, process buckets. Progress on rank 0.
         """
+        if rollout_id is not None:
+            timestamp(self.args, f"weight_updates_begin {rollout_id}")
+
         self.weight_version += 1
 
         rank = dist.get_rank()
@@ -141,6 +145,9 @@ class UpdateWeightFromTensor:
                 )
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
+
+        if rollout_id is not None:
+            timestamp(self.args, f"weight_updates_end {rollout_id}")
 
     def _send_hf_params(self, hf_named_tensors) -> tuple[list[ObjectRef], Any]:
         all_refs = []

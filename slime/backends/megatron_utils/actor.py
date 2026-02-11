@@ -22,6 +22,7 @@ from slime.utils.memory_utils import clear_memory, print_memory
 from slime.utils.misc import Box
 from slime.utils.reloadable_process_group import destroy_process_groups, monkey_patch_torch_dist, reload_process_groups
 from slime.utils.routing_replay import RoutingReplay
+from slime.utils.timestamp import timestamp
 from slime.utils.timer import Timer, inverse_timer, timer, with_defer
 from slime.utils.types import RolloutBatch
 
@@ -54,6 +55,9 @@ class MegatronTrainRayActor(TrainRayActor):
         monkey_patch_torch_dist()
 
         super().init(args, role, with_ref)
+        if getattr(self.args, "timestamp_path", None) and role == "actor":
+            self.args.timestamp_process = "actor"
+            self.args.timestamp_actor_rank = dist.get_rank()
 
         init(args)
 
@@ -124,7 +128,14 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.vocab_size is None:
             self.args.vocab_size = self.tokenizer.vocab_size
 
-        update_weight_cls = UpdateWeightFromTensor if self.args.colocate else UpdateWeightFromHost
+        # update_weights_from_host and colocate are mutually exclusive (validated in arguments).
+        update_weight_cls = (
+            UpdateWeightFromTensor
+            if self.args.colocate
+            else UpdateWeightFromHost
+            if self.args.update_weights_from_host
+            else UpdateWeightFromDistributed
+        )
         self.weight_updater = update_weight_cls(
             self.args,
             self.model,
@@ -393,11 +404,14 @@ class MegatronTrainRayActor(TrainRayActor):
     def train_actor(self, rollout_id: int, rollout_data: RolloutBatch) -> None:
         # Create data iterator for log_probs and train.
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
+        
+        print("#TAG num_microbatches", num_microbatches)
 
         if self.args.use_rollout_routing_replay:
             self.fill_routing_replay(data_iterator, num_microbatches, rollout_data)
 
         with inverse_timer("train_wait"), timer("train"):
+            timestamp(self.args, f"training_begin {rollout_id}")
             if self.args.compute_advantages_and_returns:
                 if "ref" in self.weights_backuper.backup_tags:
                     if self.args.use_routing_replay:
@@ -463,6 +477,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 )
 
             self.prof.step(rollout_id=rollout_id)
+            timestamp(self.args, f"training_end {rollout_id}")
 
         train_dump_utils.save_debug_train_data(self.args, rollout_id=rollout_id, rollout_data=rollout_data)
 
@@ -470,6 +485,7 @@ class MegatronTrainRayActor(TrainRayActor):
             RoutingReplay.clear_all()
 
         # update the cpu actor weight to the latest model
+        timestamp(self.args, f"backup_begin {rollout_id}")
         self.weights_backuper.backup("actor")
 
         # Update ref model if needed
@@ -482,6 +498,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 if is_megatron_main_rank():
                     logger.info(f"Updating ref model at rollout_id {rollout_id}")
                 self.weights_backuper.backup("ref")
+        timestamp(self.args, f"backup_end {rollout_id}")
 
         log_perf_data(rollout_id, self.args)
 
@@ -513,7 +530,7 @@ class MegatronTrainRayActor(TrainRayActor):
             destroy_process_groups()
 
     @timer
-    def update_weights(self) -> None:
+    def update_weights(self, rollout_id: int | None = None) -> None:
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
@@ -537,7 +554,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
             print_memory("before update_weights")
-            self.weight_updater.update_weights()
+            self.weight_updater.update_weights(rollout_id=rollout_id)
             print_memory("after update_weights")
 
             if self.args.ci_test and len(rollout_engines) > 0:

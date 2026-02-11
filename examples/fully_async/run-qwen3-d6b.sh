@@ -15,19 +15,16 @@ set -ex
 # will prevent ray from buffering stdout/stderr
 export PYTHONBUFFERED=16
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-
-NVLINK_COUNT=$(nvidia-smi | grep -o "NVLink" | wc -l)
+NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
 if [ "$NVLINK_COUNT" -gt 0 ]; then
     HAS_NVLINK=1
 else
     HAS_NVLINK=0
 fi
 echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
-# HAS_NVLINK=1
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "/root/slime/scripts/models/qwen3-0.6B.sh"
+source "${SCRIPT_DIR}/../../scripts/models/qwen3-0.6B.sh"
 
 CKPT_ARGS=(
    --hf-checkpoint /root/data/Qwen3-0.6B
@@ -38,31 +35,28 @@ CKPT_ARGS=(
    --save-interval 20
 )
 
-ROLLOUT_ARGS=(
-   --prompt-data /root/data/dapo-math-17k/dapo-math-17k.jsonl
+PROMPT_SET=/root/data/dapo-math-17k/dapo-math-17k.jsonl
+
+ROLLOUT_ARGS=()
+[ -n "${USE_FULLY_ASYNC}" ] && ROLLOUT_ARGS+=(--rollout-function-path fully_async_rollout.generate_rollout_fully_async)
+ROLLOUT_ARGS+=(
+   --prompt-data ${PROMPT_SET}
    --input-key prompt
    --label-key label
    --apply-chat-template
    --rollout-shuffle
 
-   --rm-type deepscaler
+   --rm-type dapo
+   --reward-key score
 
-   --num-rollout 7
+   --num-rollout 4
    --rollout-batch-size 4
-   --n-samples-per-prompt 8
+   --n-samples-per-prompt 4
    --rollout-max-response-len 32
    --rollout-temperature 1
 
-   --global-batch-size 32
+   --global-batch-size 16
    --balance-data
-)
-
-EVAL_ARGS=(
-   --eval-interval 20
-   --eval-prompt-data aime /root/data/aime-2024/aime-2024.jsonl
-   --n-samples-per-eval-prompt 16
-   --eval-max-response-len 8192
-   --eval-top-p 0.7
 )
 
 PERF_ARGS=(
@@ -84,12 +78,14 @@ PERF_ARGS=(
 
 GRPO_ARGS=(
    --advantage-estimator grpo
-   # --use-kl-loss
-   # --kl-loss-coef 0.00
-   # --kl-loss-type low_var_kl
+   --use-kl-loss
+   --kl-loss-coef 0.00
+   --kl-loss-type low_var_kl
    --entropy-coef 0.00
    --eps-clip 0.2
    --eps-clip-high 0.28
+
+   --use-tis
 )
 
 OPTIMIZER_ARGS=(
@@ -101,16 +97,8 @@ OPTIMIZER_ARGS=(
    --adam-beta2 0.98
 )
 
-# WANDB_ARGS=(
-#    --use-wandb
-#    --wandb-project slime-dev-qwen3-radix
-#    --wandb-group qwen3-0.6B-4xgpu
-#    --wandb-key ${WANDB_KEY}
-# )
-
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 1
-   # --use-slime-router
 )
 
 MISC_ARGS=(
@@ -126,16 +114,22 @@ MISC_ARGS=(
 
 # launch the master node of ray in container
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 4 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 4 --disable-usage-stats
 
-# Build the runtime environment JSON with proper variable substitution
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
-    \"PYTHONPATH\": \"/root/Megatron-LM/\",
+    \"PYTHONPATH\": \"/root/Megatron-LM/:${SCRIPT_DIR}\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\"
   }
 }"
+
+UPDATE_FROM_HOST=(${USE_FULLY_ASYNC:+--update-weights-from-host})
+if [ ${USE_FULLY_ASYNC} -eq 1 ]; then
+   TIMESTAMP_PATH=/root/slime/timestamp/ts-qwen3-d6b-fasync
+else
+   TIMESTAMP_PATH=/root/slime/timestamp/ts-qwen3-d6b-disagg
+fi
 
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
@@ -144,14 +138,13 @@ ray job submit --address="http://127.0.0.1:8265" \
    --actor-num-gpus-per-node 2 \
    --rollout-num-gpus 2 \
    --timestamp-mode immediate \
-   --timestamp-path /root/slime/timestamp/ts-qwen3-d6b-d \
+   --timestamp-path ${TIMESTAMP_PATH} \
+   ${UPDATE_FROM_HOST[@]} \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
    ${OPTIMIZER_ARGS[@]} \
    ${GRPO_ARGS[@]} \
-   ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
-   ${EVAL_ARGS[@]} \
    ${SGLANG_ARGS[@]} \
    ${MISC_ARGS[@]}

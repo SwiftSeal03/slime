@@ -89,8 +89,8 @@ def train(args):
             t_critic_wait = time.time()
         t_save = time.time()
 
-        if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
-            save(rollout_id)
+        # if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
+        #     save(rollout_id)
 
         offload_train()
         if args.offload_rollout:

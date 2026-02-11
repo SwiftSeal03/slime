@@ -717,7 +717,7 @@ class FSDPTrainRayActor(TrainRayActor):
             self.global_step += 1
 
     @timer
-    def update_weights(self) -> None:  # type: ignore[override]
+    def update_weights(self, rollout_id: int | None = None) -> None:  # type: ignore[override]
         """Synchronize actor weights to rollout engines.
 
         Handles both colocated and distributed update modes. In offload mode,
@@ -735,7 +735,7 @@ class FSDPTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_num_new_engines.remote())
 
-        self.weight_updater.update_weights()
+        self.weight_updater.update_weights(rollout_id=rollout_id)
 
         if self.args.ci_test and len(rollout_engines) > 0:
             engine = random.choice(rollout_engines)

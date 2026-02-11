@@ -12,6 +12,7 @@ from ray.actor import ActorHandle
 from tqdm import tqdm
 
 from slime.utils.distributed_utils import get_gloo_group, init_process_group
+from slime.utils.timestamp import timestamp
 
 from ..megatron_to_hf import convert_to_hf
 from .common import all_gather_param, named_params_and_buffers
@@ -71,10 +72,13 @@ class UpdateWeightFromDistributed:
             )
 
     @torch.no_grad()
-    def update_weights(self) -> None:
+    def update_weights(self, rollout_id: int | None = None) -> None:
         """
         Pause → flush → non-expert (TP) → expert (EP) → continue. Progress on PP source.
         """
+        if rollout_id is not None:
+            timestamp(self.args, f"weight_updates_begin {rollout_id}")
+
         self.weight_version += 1
 
         if dist.get_rank() == 0:
@@ -130,6 +134,9 @@ class UpdateWeightFromDistributed:
                 )
             ray.get([engine.continue_generation.remote() for engine in self.rollout_engines])
         dist.barrier(group=get_gloo_group())
+
+        if rollout_id is not None:
+            timestamp(self.args, f"weight_updates_end {rollout_id}")
 
     def _update_weight_from_distributed(
         self,

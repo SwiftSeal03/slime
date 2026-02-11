@@ -7,6 +7,7 @@ import time
 # Import core functions from sglang_rollout directly to avoid code duplication
 from slime.rollout.sglang_rollout import GenerateState, generate_and_rm_group
 from slime.utils.async_utils import run
+from slime.utils.timestamp import timestamp
 from slime.utils.types import Sample
 
 # Global worker manager
@@ -155,6 +156,8 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer) -> list[lis
     # Get global worker, which will run continuously
     worker = get_global_worker(args, data_buffer)
 
+    timestamp(args, f"rollout_begin {rollout_id}")
+
     # Simplified: directly use rollout_batch_size as target
     target_data_size = args.rollout_batch_size
 
@@ -247,6 +250,7 @@ async def generate_rollout_async(args, rollout_id: int, data_buffer) -> list[lis
         )
 
     data = sorted(data, key=lambda group: group[0].index)
+    timestamp(args, f"rollout_end {rollout_id}")
     return data
 
 

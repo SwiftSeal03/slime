@@ -48,6 +48,8 @@ class RolloutManager:
 
         self.args = args
         self.pg = pg
+        if getattr(self.args, "timestamp_path", None):
+            self.args.timestamp_process = "rollout"
         _start_router(args)
         # TODO make args immutable
         init_tracking(args, primary=False, router_addr=f"http://{args.sglang_router_ip}:{args.sglang_router_port}")

@@ -1,4 +1,5 @@
 import logging
+import shutil
 import time
 import traceback
 from pathlib import Path
@@ -10,11 +11,24 @@ from slime.utils.memory_utils import print_memory
 logger = logging.getLogger(__name__)
 
 
+def _erase_profiler_dir(path: Path) -> None:
+    """Remove all existing files and subdirs in path. Recreate the directory if it existed."""
+    if not path.exists():
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
 class TrainProfiler:
     def __init__(self, args):
         self.args = args
         self._torch_profiler_overall = None
         self._memory_profiler_overall = None
+
+        tb_dir = getattr(args, "tensorboard_dir", None)
+        if tb_dir is not None:
+            _erase_profiler_dir(Path(tb_dir))
 
         if args.use_pytorch_profiler and ("train_overall" in args.profile_target):
             self._torch_profiler_overall = _create_torch_profiler(args, name="train_overall")
@@ -72,7 +86,8 @@ def _create_torch_profiler(args, name):
             use_gzip=True,
         ),
         record_shapes=True,
-        with_stack=True,
+        # with_stack=True,
+        with_stack=False,
         profile_memory=True,
         with_flops=True,
     )

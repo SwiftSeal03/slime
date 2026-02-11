@@ -43,7 +43,7 @@ class UpdateWeight(abc.ABC):
     ) -> None:
         pass
 
-    def update_weights(self) -> None:
+    def update_weights(self, rollout_id: int | None = None) -> None:
         self.weight_version += 1
         bucket = []
         bucket_size = 0
