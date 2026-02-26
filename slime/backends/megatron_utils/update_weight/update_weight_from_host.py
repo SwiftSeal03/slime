@@ -35,7 +35,7 @@ def _copy_chunk_to_pinned(
             buf = torch.empty(
                 src.shape, dtype=src.dtype, device="cpu", pin_memory=True
             )
-            buf.copy_(src)
+            buf.copy_(src, non_blocking=True)
             pinned.append((name, buf))
     return pinned
 
@@ -117,6 +117,8 @@ class UpdateWeightFromHost:
             if isinstance(item, tuple):
                 pbar, final_event, rollout_id = item
                 final_event.synchronize()
+                with self._timestamp_lock:
+                    timestamp(self.args, f"weight_updates_offload_end {rollout_id}")
                 if accumulated:
                     while not ray.get(self.rollout_engine_lock.acquire.remote()):
                         time.sleep(0.1)
@@ -189,7 +191,7 @@ class UpdateWeightFromHost:
         if self._is_pp_src_rank and self._chunk_queue is not None:
             if rollout_id is not None:
                 with self._timestamp_lock:
-                    timestamp(self.args, f"weight_updates_offload_end {rollout_id}")
+                    timestamp(self.args, f"weight_updates_gather_end {rollout_id}")
             final_event = self._offload_stream.record_event()
             self._chunk_queue.put((pbar, final_event, rollout_id))
 

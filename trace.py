@@ -6,6 +6,8 @@ Each begin/end pair is drawn as a horizontal bar with duration shown.
 Reads <timestamp_path>/main.txt, <timestamp_path>/rollout.txt, <timestamp_path>/actor-*.txt and merges by time.
 Weight-update events are emitted from the update_weight modules (actor-*.txt); for multiple ranks
 the first-seen begin and last-seen end per rollout_id are used.
+Optional weight_updates_gather_end and weight_updates_offload_end (when present) subdivide the
+weight-update bar into 2–3 segments; if absent, a single begin→end bar is drawn.
 Usage: python trace.py <timestamp_path> [--output timestamp/<same_name>.png]
 """
 
@@ -80,6 +82,47 @@ def pair_intervals(
     return [(begins[k], ends[k], k) for k in keys_with_both]
 
 
+def get_weight_update_mid_events(
+    events: list[tuple[float, str]],
+) -> dict[str, tuple[float | None, float | None]]:
+    """Per-key (gather_end_ts, offload_end_ts) for weight update; None if event missing. Uses min/max over ranks."""
+    gather: dict[str, float] = {}  # key -> max(ts)
+    offload: dict[str, float] = {}  # key -> max(ts)
+    for ts, msg in events:
+        k = extract_key(msg, "weight_updates_gather_end ")
+        if k is not None:
+            gather[k] = max(gather[k], ts) if k in gather else ts
+            continue
+        k = extract_key(msg, "weight_updates_offload_end ")
+        if k is not None:
+            offload[k] = max(offload[k], ts) if k in offload else ts
+    keys = sorted(set(gather.keys()) | set(offload.keys()))
+    return {k: (gather.get(k), offload.get(k)) for k in keys}
+
+
+def weight_update_segments(
+    start: float,
+    end: float,
+    gather_end: float | None,
+    offload_end: float | None,
+) -> list[tuple[float, float]]:
+    """Split [start, end] into 1–3 segments when gather_end and/or offload_end are present (and within range)."""
+    if gather_end is None and offload_end is None:
+        return [(start, end)]
+    # Clamp mid points to [start, end] and ensure order
+    g = gather_end if gather_end is not None and start <= gather_end <= end else None
+    o = offload_end if offload_end is not None and start <= offload_end <= end else None
+    if g is not None and o is not None and g > o:
+        g, o = o, g  # ensure gather <= offload
+    if g is None and o is None:
+        return [(start, end)]
+    if g is not None and o is None:
+        return [(start, g), (g, end)]
+    if g is None and o is not None:
+        return [(start, o), (o, end)]
+    return [(start, g), (g, o), (o, end)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Visualize timestamp trace directory with 5 tracks.")
     parser.add_argument(
@@ -124,6 +167,8 @@ def main() -> None:
     for _, begin_prefix, end_prefix in tracks:
         track_intervals.append(pair_intervals(events, begin_prefix, end_prefix))
 
+    weight_update_mid = get_weight_update_mid_events(events)
+
     n_tracks = len(tracks)
     fig, axes = plt.subplots(n_tracks, 1, figsize=(14, 5), sharex=True, gridspec_kw={"height_ratios": [1] * n_tracks})
     colors = ["#2ecc71", "#3498db", "#e74c3c", "#9b59b6"]  # backup color "#f39c12" omitted
@@ -143,29 +188,58 @@ def main() -> None:
         ax.spines["left"].set_visible(False)
         ax.spines["right"].set_visible(False)
         for start, end, key in intervals:
-            width = max(end - start, 1e-6)  # avoid zero-width
-            bar = mpatches.FancyBboxPatch(
-                (norm(start), -0.4),
-                width,
-                0.8,
-                boxstyle="round,pad=0.01,rounding_size=0.02",
-                facecolor=color,
-                edgecolor="none",
-                alpha=0.85,
-            )
-            ax.add_patch(bar)
-            duration = end - start
-            label = f"{duration:.1f}s"
-            ax.text(
-                norm(start) + width / 2,
-                0,
-                label,
-                ha="center",
-                va="center",
-                fontsize=9,
-                color="white",
-                weight="bold",
-            )
+            if track_name == "weight update":
+                gather_end, offload_end = weight_update_mid.get(key, (None, None))
+                segs = weight_update_segments(start, end, gather_end, offload_end)
+                segment_alphas = [0.95, 0.8, 0.65][: len(segs)]  # darker = earlier phase
+                for seg_idx, (s_start, s_end) in enumerate(segs):
+                    width = max(s_end - s_start, 1e-6)
+                    bar = mpatches.FancyBboxPatch(
+                        (norm(s_start), -0.4),
+                        width,
+                        0.8,
+                        boxstyle="round,pad=0.01,rounding_size=0.02",
+                        facecolor=color,
+                        edgecolor="none",
+                        alpha=segment_alphas[seg_idx],
+                    )
+                    ax.add_patch(bar)
+                    duration = s_end - s_start
+                    label = f"{duration:.1f}s"
+                    ax.text(
+                        norm(s_start) + width / 2,
+                        0,
+                        label,
+                        ha="center",
+                        va="center",
+                        fontsize=9,
+                        color="white",
+                        weight="bold",
+                    )
+            else:
+                width = max(end - start, 1e-6)  # avoid zero-width
+                bar = mpatches.FancyBboxPatch(
+                    (norm(start), -0.4),
+                    width,
+                    0.8,
+                    boxstyle="round,pad=0.01,rounding_size=0.02",
+                    facecolor=color,
+                    edgecolor="none",
+                    alpha=0.85,
+                )
+                ax.add_patch(bar)
+                duration = end - start
+                label = f"{duration:.1f}s"
+                ax.text(
+                    norm(start) + width / 2,
+                    0,
+                    label,
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="white",
+                    weight="bold",
+                )
         # Show average bar length at the end of the track (horizontal)
         if avg_len is not None:
             ax.text(
