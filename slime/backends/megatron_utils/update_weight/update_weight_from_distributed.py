@@ -57,11 +57,12 @@ class UpdateWeightFromDistributed:
         self._is_pp_src_rank = (
             mpu.get_data_parallel_rank(with_context_parallel=True) == 0 and mpu.get_tensor_model_parallel_rank() == 0
         )
+        print(f"self._is_pp_src_rank: {self._is_pp_src_rank}")
         pp_rank = mpu.get_pipeline_model_parallel_rank()
         if self._is_pp_src_rank:
             self._group_name = f"slime-pp_{pp_rank}"
 
-        if self._is_pp_src_rank:
+        if self._is_pp_src_rank and rollout_engines is not None:
             if self._model_update_groups is not None:
                 disconnect_rollout_engines_from_distributed(
                     self.args, self._group_name, self._model_update_groups, self.rollout_engines
@@ -77,7 +78,7 @@ class UpdateWeightFromDistributed:
         """
         self.weight_version += 1
 
-        if dist.get_rank() == 0:
+        if dist.get_rank() == 0 and not self.args.debug_train_only:
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
             ray.get([engine.flush_cache.remote() for engine in self.rollout_engines])
 
@@ -120,7 +121,7 @@ class UpdateWeightFromDistributed:
             self._update_expert_bucket_weights_from_distributed(named_tensors, pbar=pbar)
 
         dist.barrier(group=get_gloo_group())
-        if dist.get_rank() == 0:
+        if dist.get_rank() == 0 and not self.args.debug_train_only:
             # int4/fp4 post_process
             if self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
@@ -223,6 +224,12 @@ class UpdateWeightFromDistributed:
         """
         Lock → broadcast → clear → unlock → pbar++. Lock prevents NCCL deadlock.
         """
+        if self.args.debug_train_only:
+            print(f"update_bucket_weights_from_distributed: {'\n'.join([f'{name}: {tensor.shape}' for name, tensor in converted_named_tensors])}")
+            converted_named_tensors.clear()
+            pbar.update(1)
+            return
+        
         # lock the rollout engines to prevent dead lock on broadcast.
         while not ray.get(self.rollout_engine_lock.acquire.remote()):
             time.sleep(0.1)

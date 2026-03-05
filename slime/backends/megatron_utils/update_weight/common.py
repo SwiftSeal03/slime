@@ -20,6 +20,8 @@ def all_gather_param(name: str, param: torch.nn.Parameter) -> torch.Tensor:
     if "expert_bias" in name:
         return param
 
+    # print(f"name: {name}, partition_dim: {partition_dim}, shape: {param.shape}, real_shape: {param.data.shape}")
+    
     assert hasattr(param, "tensor_model_parallel"), f"{name} does not have tensor_model_parallel attribute"
     if not param.tensor_model_parallel or getattr(param, "parallel_mode", None) == "duplicated":
         return param.data
@@ -177,6 +179,7 @@ def _named_params_and_buffers_global(
             layer_offset = get_transformer_layer_offset(model_module.config)
         for name, param in model_module.named_parameters():
             # for model without ddp wrap
+            print(f"name: {name}, param: {param.shape}")
             if not name.startswith("module.module."):
                 name = "module." + name
 

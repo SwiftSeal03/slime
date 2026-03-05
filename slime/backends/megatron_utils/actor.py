@@ -124,7 +124,7 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.vocab_size is None:
             self.args.vocab_size = self.tokenizer.vocab_size
 
-        update_weight_cls = UpdateWeightFromTensor if self.args.colocate else UpdateWeightFromHost
+        update_weight_cls = UpdateWeightFromTensor if self.args.colocate else UpdateWeightFromDistributed
         self.weight_updater = update_weight_cls(
             self.args,
             self.model,
@@ -514,7 +514,12 @@ class MegatronTrainRayActor(TrainRayActor):
 
     @timer
     def update_weights(self) -> None:
-        if self.args.debug_train_only or self.args.debug_rollout_only:
+        if self.args.debug_rollout_only:
+            return
+        
+        if self.args.debug_train_only:
+            self.weight_updater.connect_rollout_engines(None, None)
+            self.weight_updater.update_weights()
             return
 
         if self.args.use_fault_tolerance:

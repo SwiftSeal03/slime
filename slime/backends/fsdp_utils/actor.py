@@ -723,7 +723,13 @@ class FSDPTrainRayActor(TrainRayActor):
         Handles both colocated and distributed update modes. In offload mode,
         wakes up parameters as needed to perform the update.
         """
-        if self.args.debug_train_only or self.args.debug_rollout_only:
+        # if self.args.debug_train_only or self.args.debug_rollout_only:
+        #     return
+        if self.args.debug_rollout_only:
+            return
+        
+        if self.args.debug_train_only:
+            self.weight_updater.update_weights()
             return
 
         rollout_engines, rollout_engine_lock, num_new_engines = ray.get(
