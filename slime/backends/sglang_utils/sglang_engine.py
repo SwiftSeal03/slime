@@ -325,6 +325,10 @@ class SGLangEngine(RayActor):
                 response.raise_for_status()
         kill_process_tree(self.process.pid)
 
+    def get_server_info(self):
+        """Return (server_host, server_port) for wbridge/WeightSender receiver URLs."""
+        return self.server_host, self.server_port
+
     def get_weight_version(self):
         if self.node_rank != 0:
             return
