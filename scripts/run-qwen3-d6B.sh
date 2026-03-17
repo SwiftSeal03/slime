@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # for rerun the task
-pkill -9 sglang
-sleep 3
-ray stop --force
-pkill -9 ray
-pkill -9 python
-sleep 3
-pkill -9 ray
-pkill -9 python
+# pkill -9 sglang
+# sleep 3
+# ray stop --force
+# pkill -9 ray
+# pkill -9 python
+# sleep 3
+# pkill -9 ray
+# pkill -9 python
 
 set -ex
 
@@ -111,9 +111,11 @@ OPTIMIZER_ARGS=(
 # )
 
 SGLANG_ARGS=(
-   --rollout-num-gpus-per-engine 1
+   --rollout-num-gpus-per-engine 2
    --use-slime-router
    --sglang-mem-fraction-static 0.5
+   --sglang-disable-cuda-graph
+   # --sglang-load-format dummy
 )
 
 MISC_ARGS=(
@@ -128,8 +130,8 @@ MISC_ARGS=(
 )
 
 # launch the master node of ray in container
-export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 2 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+# export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
+# ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 2 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 # Build the runtime environment JSON with proper variable substitution
 RUNTIME_ENV_JSON="{

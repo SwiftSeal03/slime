@@ -16,6 +16,17 @@ def train(args):
     # create the rollout manager, with sglang engines inside.
     # need to initialize rollout manager first to calculate num_rollout
     rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
+    
+    rollout_engines, _, _ = ray.get(rollout_manager.get_rollout_engines_and_lock.remote())
+    server_infos = ray.get([engine.get_server_info.remote() for engine in rollout_engines])
+    receiver_urls = [f"http://{host}:{port}" for host, port in server_infos]
+    from wbridge import WeightSender
+    import json
+    sender = WeightSender("gpu_direct", receiver_urls)
+    print("#DEBUG: metadata")
+    print(json.dumps(sender.get_metadata(), indent=4))
+    print("#DEBUG: metadata end")
+    return
 
     # create the actor and critic models
     actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
@@ -26,7 +37,6 @@ def train(args):
     # always update weight first so that sglang has the loaded weights from training.
     actor_model.update_weights()
     
-    return
 
     if args.check_weight_update_equal:
         ray.get(rollout_manager.check_weights.remote(action="compare"))
