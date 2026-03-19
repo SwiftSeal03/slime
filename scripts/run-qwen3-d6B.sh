@@ -1,21 +1,21 @@
 #!/bin/bash
 
 # for rerun the task
-# pkill -9 sglang
+# sudo pkill -9 sglang
 # sleep 3
 # ray stop --force
-# pkill -9 ray
-# pkill -9 python
+# sudo pkill -9 ray
+# sudo pkill -9 python
 # sleep 3
-# pkill -9 ray
-# pkill -9 python
+# sudo pkill -9 ray
+# sudo pkill -9 python
 
 set -ex
 
 # will prevent ray from buffering stdout/stderr
 export PYTHONBUFFERED=16
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0,1
 
 # NVLINK_COUNT=$(nvidia-smi | grep -o "NVLink" | wc -l)
 # if [ "$NVLINK_COUNT" -gt 0 ]; then
@@ -27,20 +27,22 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 HAS_NVLINK=1
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "/root/slime/scripts/models/qwen3-0.6B.sh"
+SLIME_DIR="${SLIME_DIR:-$HOME/slime}"
+DATA_DIR="${DATA_DIR:-$HOME/data}"
+source "${SLIME_DIR}/scripts/models/qwen3-0.6B.sh"
 
 CKPT_ARGS=(
-   --hf-checkpoint /root/data/Qwen3-0.6B
+   --hf-checkpoint ${DATA_DIR}/Qwen3-0.6B
    #--hf-checkpoint /root/Qwen3-0.6B-FP8
-   --ref-load /root/data/Qwen3-0.6B_torch_dist
-   # --load /root/data/Qwen3-0.6B_slime/
-   --save /root/data/Qwen3-0.6B_slime/
+   --ref-load ${DATA_DIR}/Qwen3-0.6B_torch_dist
+   # --load ${DATA_DIR}/Qwen3-0.6B_slime/
+   --save ${DATA_DIR}/Qwen3-0.6B_slime/
    --save-interval 100
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data /root/data/dapo-math-17k/dapo-math-17k.jsonl
-   # --prompt-data /root/data/gsm8k/train.jsonl
+   --prompt-data ${DATA_DIR}/dapo-math-17k/dapo-math-17k.jsonl
+   # --prompt-data ${DATA_DIR}/gsm8k/train.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -60,8 +62,8 @@ ROLLOUT_ARGS=(
 
 EVAL_ARGS=(
    --eval-interval 100
-   --eval-prompt-data aime /root/data/aime-2024/aime-2024.jsonl
-   # --eval-prompt-data gsm8k /root/data/gsm8k/test.jsonl
+   --eval-prompt-data aime ${DATA_DIR}/aime-2024/aime-2024.jsonl
+   # --eval-prompt-data gsm8k ${DATA_DIR}/gsm8k/test.jsonl
    --n-samples-per-eval-prompt 8
    --eval-max-response-len 1024
    --eval-top-p 0.7
@@ -130,13 +132,13 @@ MISC_ARGS=(
 )
 
 # launch the master node of ray in container
-# export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
+export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 # ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 2 --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 # Build the runtime environment JSON with proper variable substitution
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
-    \"PYTHONPATH\": \"/root/Megatron-LM/\",
+    \"PYTHONPATH\": \"${HOME}/Megatron-LM/\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\"
   }
