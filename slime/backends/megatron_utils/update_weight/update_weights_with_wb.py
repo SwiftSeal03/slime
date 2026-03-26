@@ -41,6 +41,9 @@ class UpdateWeightWithWB:
         self._model_update_groups = None
         
     def connect_rollout_engines(self, rollout_engines: Sequence[ActorHandle], rollout_engine_lock: ActorHandle) -> None:
+        """
+        This function is called by the Actor after the rollout engines are created.
+        """
         self.rollout_engines = rollout_engines
         self.rollout_engine_lock = rollout_engine_lock
         server_infos = ray.get([engine.get_server_info.remote() for engine in self.rollout_engines])
