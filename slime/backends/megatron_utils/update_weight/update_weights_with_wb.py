@@ -52,6 +52,8 @@ class UpdateWeightWithWB:
             transfer_mode="gpu_direct",
             receiver_urls=receiver_urls,
         )
+        named_tensors = list(named_params_and_buffers(self.args, self.model))
+        self.weight_sender.connect(convert_to_wb(self.args, self.model_name, named_tensors, self.quantization_config))
 
     @torch.no_grad()
     def update_weights(self) -> None:
@@ -70,8 +72,8 @@ class UpdateWeightWithWB:
         dist.barrier(group=get_gloo_group())
 
         named_tensors = list(named_params_and_buffers(self.args, self.model))
-        weight_data = convert_to_wb(self.args, self.model_name, named_tensors, self.quantization_config)
-        self.weight_sender.send(weight_data)
+        tensors_to_send = convert_to_wb(self.args, self.model_name, named_tensors, self.quantization_config)
+        self.weight_sender.send(named_tensors)
 
         dist.barrier(group=get_gloo_group())
         if dist.get_rank() == 0:
