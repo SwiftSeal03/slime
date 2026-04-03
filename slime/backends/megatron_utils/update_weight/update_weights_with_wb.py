@@ -2,6 +2,9 @@
 Update distributed engines via wbridge. Same interface as update_weight_from_distributed.
 """
 
+from torch._tensor import Tensor
+
+
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 
@@ -10,7 +13,8 @@ import torch
 import torch.distributed as dist
 from ray.actor import ActorHandle
 
-from wbridge import WeightSender, WeightData
+from wbridge import WeightSender
+from wbridge.utils.distributed import get_local_ip, get_full_group_port
 from wbridge.utils.megatron_utils import convert_to_wb
 
 
@@ -51,9 +55,14 @@ class UpdateWeightWithWB:
         self.weight_sender = WeightSender(
             transfer_mode="gpu_direct",
             receiver_urls=receiver_urls,
+            rank=dist.get_rank(),
+            world_size=dist.get_world_size(),
+            master_addr=get_local_ip(),
+            master_port=get_full_group_port() + 1,
         )
-        named_tensors = list(named_params_and_buffers(self.args, self.model))
-        self.weight_sender.connect(convert_to_wb(self.args, self.model_name, named_tensors, self.quantization_config))
+        named_tensors = list[tuple[str, Tensor]](named_params_and_buffers(self.args, self.model))
+        shard_spec = convert_to_wb(self.args, self.model_name, named_tensors, self.quantization_config)[0]
+        self.weight_sender.connect(shard_spec)
 
     @torch.no_grad()
     def update_weights(self) -> None:
@@ -72,8 +81,10 @@ class UpdateWeightWithWB:
         dist.barrier(group=get_gloo_group())
 
         named_tensors = list(named_params_and_buffers(self.args, self.model))
-        tensors_to_send = convert_to_wb(self.args, self.model_name, named_tensors, self.quantization_config)
-        self.weight_sender.send(named_tensors)
+        _, tensors_to_send = convert_to_wb(
+            self.args, self.model_name, named_tensors, self.quantization_config
+        )
+        self.weight_sender.send(tensors_to_send)
 
         dist.barrier(group=get_gloo_group())
         if dist.get_rank() == 0:
