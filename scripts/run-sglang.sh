@@ -1,0 +1,13 @@
+python -m sglang.launch_server \
+  --model-path moonshotai/Moonlight-16B-A3B\
+  --trust-remote-code \
+  --host 10.243.38.72 \
+  --port 15000 \
+  --skip-server-warmup \
+  --nccl-port 15001 \
+  --tensor-parallel-size 2 \
+  --dist-init-addr 10.243.38.72:15002 \
+  --random-seed 1234 \
+  --disable-cuda-graph \
+  --enable-draft-weights-cpu-backup \
+  --mem-fraction-static 0.7
