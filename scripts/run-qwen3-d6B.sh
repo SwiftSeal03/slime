@@ -105,19 +105,19 @@ OPTIMIZER_ARGS=(
    --adam-beta2 0.98
 )
 
-# WANDB_ARGS=(
-#    --use-wandb
-#    --wandb-project slime-dev-qwen3-radix
-#    --wandb-group qwen3-0.6B-4xgpu
-#    --wandb-key ${WANDB_KEY}
-# )
+WANDB_ARGS=(
+   # --use-wandb
+   # --wandb-project slime-dev-qwen3-radix
+   # --wandb-group qwen3-0.6B-4xgpu
+   # --wandb-key ${WANDB_KEY}
+)
 
 SGLANG_ARGS=(
-   --rollout-num-gpus-per-engine 2
-   --use-slime-router
-   --sglang-mem-fraction-static 0.5
-   --sglang-disable-cuda-graph
-   # --sglang-load-format dummy
+   # --rollout-num-gpus-per-engine 2
+   # --use-slime-router
+   # --sglang-mem-fraction-static 0.5
+   # --sglang-disable-cuda-graph
+   # # --sglang-load-format dummy
 )
 
 MISC_ARGS=(
@@ -146,11 +146,10 @@ RUNTIME_ENV_JSON="{
 
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
-   -- python3 train.py \
+   -- python3 /root/slime/train.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 2 \
-   --rollout-num-gpus 2 \
-   --wbridge \
+   --debug-train-only \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
