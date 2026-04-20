@@ -2,9 +2,6 @@
 Update distributed engines via wbridge. Same interface as update_weight_from_distributed.
 """
 
-from torch._tensor import Tensor
-
-
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 
@@ -13,15 +10,14 @@ import torch
 import torch.distributed as dist
 from ray.actor import ActorHandle
 
-from wbridge import WeightSender
+from wbridge.backend.sender import SenderArgs
+from wbridge.frontend.megatron_adapter import WBMegatronAdapter
 from wbridge.utils.distributed import get_local_ip, get_full_group_port
-from wbridge.utils.megatron_utils import convert_to_wb
-
 
 from slime.utils.distributed_utils import get_gloo_group
 
-from .common import named_params_and_buffers
 from .update_weight_from_distributed import post_process_weights
+
 
 class UpdateWeightWithWB:
     """
@@ -39,11 +35,13 @@ class UpdateWeightWithWB:
     ) -> None:
         self.args = args
         self.model = model
+        self._weights_getter = weights_getter
         self.model_name = model_name
         self.quantization_config = quantization_config
         self.weight_version = 0
         self._model_update_groups = None
-        
+        self._wb: WBMegatronAdapter | None = None
+
     def connect_rollout_engines(self, rollout_engines: Sequence[ActorHandle], rollout_engine_lock: ActorHandle) -> None:
         """
         This function is called by the Actor after the rollout engines are created.
@@ -52,21 +50,25 @@ class UpdateWeightWithWB:
         self.rollout_engine_lock = rollout_engine_lock
         server_infos = ray.get([engine.get_server_info.remote() for engine in self.rollout_engines])
         receiver_urls = [f"http://{host}:{port}" for host, port in server_infos]
-        self.weight_sender = WeightSender(
+        sender_args = SenderArgs(
+            world_size=dist.get_world_size(),
             transfer_mode="gpu_direct",
             receiver_urls=receiver_urls,
-            rank=dist.get_rank(),
-            world_size=dist.get_world_size(),
             master_addr=get_local_ip(),
-            master_port=get_full_group_port() + 1,
+            master_port=get_full_group_port(),
         )
-        named_tensors = list[tuple[str, Tensor]](named_params_and_buffers(self.args, self.model))
-        shard_spec = convert_to_wb(self.args, self.model_name, named_tensors, self.quantization_config)[0]
-        self.weight_sender.connect(shard_spec)
+        self._wb = WBMegatronAdapter(
+            self.args.hf_checkpoint,
+            list(self.model),
+            dist.get_rank(),
+            sender_args,
+        )
+        self._wb.connect()
 
     @torch.no_grad()
     def update_weights(self) -> None:
         self.weight_version += 1
+        assert self._wb is not None, "connect_rollout_engines must be called before update_weights"
 
         if dist.get_rank() == 0:
             ray.get([engine.pause_generation.remote() for engine in self.rollout_engines])
@@ -80,11 +82,7 @@ class UpdateWeightWithWB:
                 )
         dist.barrier(group=get_gloo_group())
 
-        named_tensors = list(named_params_and_buffers(self.args, self.model))
-        _, tensors_to_send = convert_to_wb(
-            self.args, self.model_name, named_tensors, self.quantization_config
-        )
-        self.weight_sender.send(tensors_to_send)
+        self._wb.send_weights()
 
         dist.barrier(group=get_gloo_group())
         if dist.get_rank() == 0:

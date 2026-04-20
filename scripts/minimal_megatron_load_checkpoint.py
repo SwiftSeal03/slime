@@ -22,7 +22,7 @@ synthetic rollout-related flags this script prepends (``--num-rollout``, ``--rol
 …).
 
 **WeightBridge / LoadSpec:** After ``dist.barrier()``, this script always constructs
-:class:`~wbridge.adapter.megatron_adapter.WBMegatronAdapter`. That runs Megatron-Bridge
+:class:`~wbridge.frontend.megatron_adapter.WBMegatronAdapter`. That runs Megatron-Bridge
 ``AutoBridge.from_hf_pretrained`` on ``--hf-checkpoint``, tries to load a cached :class:`~wbridge.utils.data.LoadSpec` from ``~/.cache/megatron/loadspec_rank{RANK}.json``, and on
 cache miss or verification failure re-infers the spec via ``wbridge.utils.specgen.infer_load_spec``
 and ``verify_load_spec`` (under ``torch.inference_mode()``), then writes the cache file. Inference
@@ -32,10 +32,11 @@ Wrapper shells (e.g. ``scripts/minimal_megatron_load_from_hf.sh``) may export
 ``WBRIDGE_INFER_LOAD_SPEC`` or ``SLIME_WBRIDGE_INFER_LOAD_SPEC`` for documentation consistency;
 this Python entrypoint does not branch on those variables.
 
-**``WeightSender``:** ``WBMegatronAdapter`` forwards trailing constructor arguments to
-:class:`~wbridge.frontend.sender.WeightSender`. This script passes placeholder ``None`` values so you
-can exercise LoadSpec inference without a live receiver; use real ``world_size``, transfer mode,
-receiver URLs, and master address/port when wiring an actual send path.
+**``WeightSender``:** ``WBMegatronAdapter`` takes a :class:`~wbridge.backend.sender.SenderArgs`
+dataclass, which is forwarded to :class:`~wbridge.backend.sender.WeightSender`. This script uses
+placeholder transport fields (empty receiver URLs, CPU transfer mode) so you can exercise LoadSpec
+inference without calling ``connect()``; use real URLs and ``gpu_direct`` when wiring an actual send
+path.
 """
 
 from __future__ import annotations
@@ -54,7 +55,8 @@ from slime.utils.distributed_utils import init_gloo_group
 from slime.utils.logging_utils import configure_logger
 from slime.utils.memory_utils import clear_memory
 from slime.utils.reloadable_process_group import monkey_patch_torch_dist
-from wbridge.adapter.megatron_adapter import WBMegatronAdapter
+from wbridge.backend.sender import SenderArgs
+from wbridge.frontend.megatron_adapter import WBMegatronAdapter
 
 
 def _synthetic_slime_argv(world_size: int) -> list[str]:
@@ -119,8 +121,15 @@ def main() -> None:
         print(f"OK: loaded checkpoint, iteration={iteration}, num_model_chunks={len(model)}")
 
     dist.barrier()
-    # Slime megatron.bridge plugin (optional; only imported when LoadSpec inference runs).
-    adapter = WBMegatronAdapter(args.hf_checkpoint, model, args.rank, None, None, None, None, None)
+    # Redundant since we are not using a live receivers
+    sender_args = SenderArgs(
+        world_size=args.world_size,
+        transfer_mode="cpu",
+        receiver_urls=[],
+        master_addr="127.0.0.1",
+        master_port=29500,
+    )
+    adapter = WBMegatronAdapter(args.hf_checkpoint, model, args.rank, sender_args)
     # dist.barrier()
     clear_memory()
 
