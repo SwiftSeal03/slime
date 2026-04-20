@@ -55,7 +55,7 @@ class UpdateWeightWithWB:
             transfer_mode="gpu_direct",
             receiver_urls=receiver_urls,
             master_addr=get_local_ip(),
-            master_port=get_full_group_port(),
+            master_port=get_full_group_port() + 1,
         )
         self._wb = WBMegatronAdapter(
             self.args.hf_checkpoint,

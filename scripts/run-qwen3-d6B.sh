@@ -31,11 +31,15 @@ SLIME_DIR="${SLIME_DIR:-$HOME/slime}"
 DATA_DIR="${DATA_DIR:-$HOME/data}"
 source "${SLIME_DIR}/scripts/models/qwen3-0.6B.sh"
 
+# Megatron init weights: use --megatron-to-hf-mode bridge so the trainer loads HF weights via
+# megatron.bridge (see slime_validate_args + slime/backends/megatron_utils/checkpoint.py).
+# With bridge, if --load is omitted, args.load is set to --ref-load or --hf-checkpoint.
 CKPT_ARGS=(
    --hf-checkpoint ${DATA_DIR}/Qwen3-0.6B
    #--hf-checkpoint /root/Qwen3-0.6B-FP8
-   --ref-load ${DATA_DIR}/Qwen3-0.6B_torch_dist
-   # --load ${DATA_DIR}/Qwen3-0.6B_slime/
+   --megatron-to-hf-mode bridge
+   --ref-load ${DATA_DIR}/Qwen3-0.6B
+   # Resume from Megatron run: --load ${DATA_DIR}/Qwen3-0.6B_slime/ (must contain latest_checkpointed_iteration.txt)
    --save ${DATA_DIR}/Qwen3-0.6B_slime/
    --save-interval 100
 )
@@ -113,11 +117,11 @@ WANDB_ARGS=(
 )
 
 SGLANG_ARGS=(
-   # --rollout-num-gpus-per-engine 2
-   # --use-slime-router
-   # --sglang-mem-fraction-static 0.5
-   # --sglang-disable-cuda-graph
-   # # --sglang-load-format dummy
+   --rollout-num-gpus-per-engine 2
+   --use-slime-router
+   --sglang-mem-fraction-static 0.5
+   --sglang-disable-cuda-graph
+   # --sglang-load-format dummy
 )
 
 MISC_ARGS=(
@@ -146,10 +150,11 @@ RUNTIME_ENV_JSON="{
 
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
-   -- python3 /root/slime/train.py \
+   -- python3 -u /root/slime/train.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 2 \
-   --debug-train-only \
+   --rollout-num-gpus 2 \
+   --wbridge \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
