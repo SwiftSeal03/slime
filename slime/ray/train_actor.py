@@ -27,6 +27,9 @@ def get_local_gpu_id():
 
 class TrainRayActor(RayActor):
     def __init__(self, world_size, rank, master_addr, master_port):
+        os.environ.setdefault("NCCL_SOCKET_IFNAME", "eno1")
+        os.environ.setdefault("GLOO_SOCKET_IFNAME", "eno1")
+
         configure_logger()
 
         self._world_size = world_size

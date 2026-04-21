@@ -57,9 +57,6 @@ class UpdateWeightWithWB:
             master_addr=get_local_ip(),
             master_port=get_full_group_port() + 1,
         )
-        import os
-        os.environ.setdefault("NCCL_SOCKET_IFNAME", "eno1")
-        os.environ.setdefault("GLOO_SOCKET_IFNAME", "eno1")
         self._wb = WBMegatronAdapter(
             self.args.hf_checkpoint,
             list(self.model),
