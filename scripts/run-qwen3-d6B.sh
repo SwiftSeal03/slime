@@ -145,8 +145,7 @@ RUNTIME_ENV_JSON="{
     \"PYTHONPATH\": \"${HOME}/Megatron-LM/\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
-    \"NCCL_DEBUG\": \"INFO\",
-    \"NCCL_DEBUG_SUBSYS\": \"INIT,COLL\"
+    \"RAY_DEDUP_LOGS\": \"0\"
   }
 }"
 
